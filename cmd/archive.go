@@ -1,12 +1,12 @@
 package main
 
 import (
-	ba "bgparchive"
-	api "bgparchive/api"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	ba "github.com/CSUNetSec/bgparchive"
+	api "github.com/CSUNetSec/bgparchive/api"
 	"log"
 	"os"
 	"strconv"

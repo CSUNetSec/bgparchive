@@ -1,7 +1,6 @@
 package bgparchive
 
 import (
-	"bgparchive/api"
 	"bufio"
 	"bytes"
 	"compress/bzip2"
@@ -10,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/CSUNetSec/bgparchive/api"
 	bgpbgp "github.com/osrg/gobgp/packet/bgp"
 	bgpmrt "github.com/osrg/gobgp/packet/mrt"
 	"github.com/rogpeppe/fastuuid"

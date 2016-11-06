@@ -6,9 +6,9 @@ package main
 // TODO Add the ability to print byte offset of each entry
 
 import (
-	bgp "bgparchive"
 	"flag"
 	"fmt"
+	bgp "github.com/CSUNetSec/bgparchive"
 )
 
 func main() {

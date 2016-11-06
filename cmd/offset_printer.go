@@ -8,38 +8,36 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"time"
 )
 
 func main() {
-	fileName := flag.String("-f", "default", "-f the file to parse/index")
+	fileName := flag.String("f", "default", "-f the file to parse/index")
 	flag.Parse()
 
-	f, ferr := os.Open(*fileName)
+	fmt.Println(*fileName)
 
+	f, ferr := os.Open(*fileName)
 	if ferr != nil {
-		fmt.Println(err)
+		fmt.Println(ferr)
 		return
 	}
 
-	decoder := gob.NewDecoder(f)
-	var currEntry bgp.ArchEntryFile
-	var startTime time.Time
-	first := true
-	for decoder.Decode(&currEntry) != nil {
-		if first {
-			first = false
-			startTime = currEnty.Sdate
-		}
-		pos, serr := f.Seek(0, 1) // Should grab the current position of the file
-		if serr != nil {
-			fmt.Println(err)
-			return
-		}
-		printEntry(currEntry, pos, currEntry.Sdate.Sub(startTime))
+	dec := gob.NewDecoder(f)
+	fileEntries := make([]bgp.ArchEntryFile, 10)
+	err := dec.Decode(&fileEntries)
+
+	if err != nil {
+		fmt.Println(err)
 	}
+	index := 0
+	for _, file := range fileEntries {
+		printEntry(file)
+		index++
+	}
+	fmt.Printf("\nNumber of entries: %d\n", index)
+
 }
 
-func printEntry(file bgp.ArchEntryFile, pos int64, timeOff time.Time) {
-	fmt.Println(file.String + " : " + pos + " : " + timeOff)
+func printEntry(file bgp.ArchEntryFile) {
+	fmt.Printf("%s %s %d(bytes)\n", file.Path, file.Sdate.String(), file.Sz)
 }

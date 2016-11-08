@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"github.com/CSUNetSec/bgparchive/api"
-	bgpbgp "github.com/osrg/gobgp/packet/bgp"
-	bgpmrt "github.com/osrg/gobgp/packet/mrt"
+	pb "github.com/CSUNetSec/netsec-protobufs/protocol/bgp"
+	pp "github.com/CSUNetSec/protoparse"
+	//ppbgp "github.com/CSUNetSec/protoparse/protocol/bgp"
+	ppmrt "github.com/CSUNetSec/protoparse/protocol/mrt"
 	"github.com/rogpeppe/fastuuid"
 	"io"
 	"io/ioutil"
@@ -650,11 +652,11 @@ func getScanner(file *os.File) (scanner *bufio.Scanner) {
 		//log.Printf("bunzip2 file: %s. opening decompression stream", fname)
 		bzreader := bzip2.NewReader(file)
 		scanner = bufio.NewScanner(bzreader)
-		scanner.Split(bgpmrt.SplitMrt)
+		scanner.Split(ppmrt.SplitMrt)
 	} else {
 		//log.Printf("no extension on file: %s. opening normally", fname)
 		scanner = bufio.NewScanner(file)
-		scanner.Split(bgpmrt.SplitMrt)
+		scanner.Split(ppmrt.SplitMrt)
 	}
 	return
 }
@@ -674,17 +676,19 @@ func getFirstDate(fname string) (t time.Time, err error) {
 		return
 	}
 	data := scanner.Bytes()
-	if len(data) < bgpmrt.MRT_COMMON_HEADER_LEN {
+	if len(data) < ppmrt.MRT_HEADER_LEN {
 		log.Printf("mrt scanner in getFirstDate returned less bytes than the minimum header")
 		return time.Now(), errors.New(fmt.Sprintf("too few bytes read from mrtfile:%s", fname))
 	}
-	hdr := bgpmrt.MRTHeader{}
-	err = hdr.DecodeFromBytes(data[:bgpmrt.MRT_COMMON_HEADER_LEN])
+
+	hdrbuf := ppmrt.NewMrtHdrBuf(data)
+	_, err = hdrbuf.Parse()
 	if err != nil {
 		log.Printf("getFirstDate error in creating MRT header:%s", err)
 		return
 	}
-	t = hdr.GetTime()
+	hdr := hdrbuf.GetHeader()
+	t = time.Unix(int64(hdr.Timestamp), 0)
 	//log.Printf("getFirstDate got header with time:%v", t)
 	return
 }
@@ -736,14 +740,16 @@ func (ma *mrtarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.Wait
 			startt := time.Now()
 			for scanner.Scan() {
 				data := scanner.Bytes()
-				hdr := bgpmrt.MRTHeader{}
-				errh := hdr.DecodeFromBytes(data[:bgpmrt.MRT_COMMON_HEADER_LEN])
-				if errh != nil {
-					log.Printf("error in creating MRT header:%s", errh)
-					rc <- api.Reply{Data: nil, Err: errh}
+
+				hdrbuf := ppmrt.NewMrtHdrBuf(data)
+				_, err := hdrbuf.Parse()
+				if err != nil {
+					log.Printf("error in creating MRT header:%s", err)
+					rc <- api.Reply{Data: nil, Err: err}
 					continue
 				}
-				msgtime := hdr.GetTime()
+				hdr := hdrbuf.GetHeader()
+				msgtime := time.Unix(int64(hdr.Timestamp), 0)
 				if msgtime.After(ta.Add(-time.Second)) && msgtime.Before(tb.Add(time.Second)) {
 					//documenation was saying that the Bytes() returnned from a scanner
 					//can be overwritten by subsequent calls to Scan().
@@ -803,79 +809,92 @@ func (fss *fsarstat) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitG
 			}
 			for scanner.Scan() {
 				data := scanner.Bytes()
-				hdr := bgpmrt.MRTHeader{}
-				errh := hdr.DecodeFromBytes(data[:bgpmrt.MRT_COMMON_HEADER_LEN])
-				if errh != nil {
-					log.Printf("error in creating MRT header:%s", errh)
-					rc <- api.Reply{Data: nil, Err: errh}
+
+				hdrbuf := ppmrt.NewMrtHdrBuf(data)
+				bgp4hbuf, err := hdrbuf.Parse()
+				if err != nil {
+					log.Printf("error in creating MRT header:%s", err)
 					continue
 				}
-				msgtime := hdr.GetTime()
+				hdr := hdrbuf.GetHeader()
+				msgtime := time.Unix(int64(hdr.Timestamp), 0)
+				bgphdrbuf, err := bgp4hbuf.Parse()
+				if err != nil {
+					log.Printf("error in creating BGP4MP header:%s", err)
+					continue
+				}
+				bgpupbuf, err := bgphdrbuf.Parse()
+				if err != nil {
+					log.Printf("error in parsing BGP header:%s", err)
+					continue
+				}
+				bgpupbuf.Parse()
+				//if err != nil {
+				//log.Printf("error in parsing BGP update:%s", err)
+				//continue
+				//}
+
+				up := bgpupbuf.(pp.BGPUpdater).GetUpdate()
 				if msgtime.After(ta.Add(-time.Second)) && msgtime.Before(tb.Add(time.Second)) {
 					st.TotalMsgs += 1
-					//log.Printf("len of data:%d with mrt header:%+v", len(data), hdr)
-					if len(data) > bgpmrt.MRT_COMMON_HEADER_LEN {
-						mrtmsg, merr := bgpmrt.ParseMRTBody(&hdr, data[bgpmrt.MRT_COMMON_HEADER_LEN:])
-						if merr == nil {
-							if hdr.Type != bgpmrt.BGP4MP && hdr.Type != bgpmrt.BGP4MP_ET { // if not bgp4m
-								continue
-							}
-							b4mpmsg := mrtmsg.Body.(*bgpmrt.BGP4MPMessage)
-							bh := b4mpmsg.BGPMessage.Header
-							if bh.Type != bgpbgp.BGP_MSG_UPDATE {
-								log.Printf("BGP4MP message that does not contain an UPDATE.instead the header is:%v .ignoring", bh)
-								continue
-							}
-							b := b4mpmsg.BGPMessage.Body.(*bgpbgp.BGPUpdate)
-							secsfromlast := int(msgtime.Sub(lastTime).Seconds())
-							if secsfromlast < 0 {
-								log.Printf("Warning! secs from last msg less than 0:%d", secsfromlast)
-							} else if secsfromlast == 0 {
-								totdelta += 1
-								totwithdrawn += len(b.WithdrawnRoutes)
-								totnlri += len(b.NLRI)
-								for _, att := range b.PathAttributes {
-									attrtype := att.GetType()
-									if attrtype == bgpbgp.BGP_ATTR_TYPE_MP_REACH_NLRI {
-										totreach += 1
-									} else if attrtype == bgpbgp.BGP_ATTR_TYPE_MP_UNREACH_NLRI {
-										totunreach += 1
-									}
+					secsfromlast := int(msgtime.Sub(lastTime).Seconds())
+					if secsfromlast < 0 {
+						log.Printf("Warning! secs from last msg less than 0:%d", secsfromlast)
+					} else if secsfromlast == 0 {
+						totdelta += 1
+						if up.WithdrawnRoutes != nil {
+							totwithdrawn += len(up.WithdrawnRoutes.Prefixes)
+						}
+						if up.AdvertizedRoutes != nil {
+							totnlri += len(up.AdvertizedRoutes.Prefixes)
+						}
+						if up.Attrs != nil {
+							for _, att := range up.Attrs.Types {
+								if att == pb.BGPUpdate_Attributes_MP_REACH_NLRI {
+									totreach += 1
+								} else if att == pb.BGPUpdate_Attributes_MP_UNREACH_NLRI {
+									totunreach += 1
 								}
-							} else if secsfromlast > 0 {
-								// flush the previous
-								st.Withdrawn = append(st.Withdrawn, totwithdrawn)
-								st.NLRI = append(st.NLRI, totnlri)
-								st.MPReach = append(st.MPReach, totreach)
-								st.MPUnreach = append(st.MPUnreach, totunreach)
-								st.TotalPerDelta = append(st.TotalPerDelta, totdelta)
-								//reset
-								totwithdrawn, totnlri, totreach, totunreach, totdelta = 0, 0, 0, 0, 0
-								if secsfromlast > 1 {
-									for sec := 1; sec < secsfromlast; sec++ {
-										//log.Printf("inserting one dummy")
-										st.Withdrawn = append(st.Withdrawn, 0)
-										st.NLRI = append(st.NLRI, 0)
-										st.MPReach = append(st.MPReach, 0)
-										st.MPUnreach = append(st.MPUnreach, 0)
-										st.TotalPerDelta = append(st.TotalPerDelta, 0)
-									}
-								}
-								totdelta += 1
-								totwithdrawn += len(b.WithdrawnRoutes)
-								totnlri += len(b.NLRI)
-								for _, att := range b.PathAttributes {
-									attrtype := att.GetType()
-									//log.Println("attribute: ", att)
-									if attrtype == bgpbgp.BGP_ATTR_TYPE_MP_REACH_NLRI {
-										totreach += 1
-									} else if attrtype == bgpbgp.BGP_ATTR_TYPE_MP_UNREACH_NLRI {
-										totunreach += 1
-									}
-								}
-								lastTime = msgtime
 							}
 						}
+					} else if secsfromlast > 0 {
+						// flush the previous
+						st.Withdrawn = append(st.Withdrawn, totwithdrawn)
+						st.NLRI = append(st.NLRI, totnlri)
+						st.MPReach = append(st.MPReach, totreach)
+						st.MPUnreach = append(st.MPUnreach, totunreach)
+						st.TotalPerDelta = append(st.TotalPerDelta, totdelta)
+						//reset
+						totwithdrawn, totnlri, totreach, totunreach, totdelta = 0, 0, 0, 0, 0
+						if secsfromlast > 1 {
+							for sec := 1; sec < secsfromlast; sec++ {
+								//log.Printf("inserting one dummy")
+								st.Withdrawn = append(st.Withdrawn, 0)
+								st.NLRI = append(st.NLRI, 0)
+								st.MPReach = append(st.MPReach, 0)
+								st.MPUnreach = append(st.MPUnreach, 0)
+								st.TotalPerDelta = append(st.TotalPerDelta, 0)
+							}
+						}
+						totdelta += 1
+						if up.WithdrawnRoutes != nil {
+							totwithdrawn += len(up.WithdrawnRoutes.Prefixes)
+						}
+						if up.AdvertizedRoutes != nil {
+							totnlri += len(up.AdvertizedRoutes.Prefixes)
+						}
+
+						if up.Attrs != nil {
+							for _, att := range up.Attrs.Types {
+								//log.Println("attribute: ", att)
+								if att == pb.BGPUpdate_Attributes_MP_REACH_NLRI {
+									totreach += 1
+								} else if att == pb.BGPUpdate_Attributes_MP_UNREACH_NLRI {
+									totunreach += 1
+								}
+							}
+						}
+						lastTime = msgtime
 					}
 				}
 			}

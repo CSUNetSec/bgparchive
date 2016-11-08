@@ -3,7 +3,7 @@
                 "desc":"UPDATES",
                 "path":"/updates",
                 "delta_minutes":15,
-                "basepath":"/home/dsp/devel/archivetest/",
+                "basepath":"/home/dsp/devel/archivetest",
                 "collector":"routeviews2"
         }
 ]

@@ -103,6 +103,7 @@ func main() {
 			log.Printf("failed to find serialized file. Scanning")
 			mrtreqc <- "SCAN"
 			//log.Printf("Entryfiles are:%s", ars[i].tempentryfiles)
+			allscanwg.Wait()
 			errg = ars[i].Save(fmt.Sprintf("%s/%s-%s", flag_savepath, v.Desc, v.Collector))
 			if errg != nil {
 				log.Println(errg)

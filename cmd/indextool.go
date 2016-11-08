@@ -32,7 +32,7 @@ func main() {
 		return
 	}
 	for _, entry := range *entries {
-		fmt.Printf("%s\n", entry)
+		fmt.Printf("%s\n", &entry)
 	}
 	fmt.Printf("\nNumber of entries: %d\n", len(*entries))
 

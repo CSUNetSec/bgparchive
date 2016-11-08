@@ -117,7 +117,7 @@ type ArchEntryFile struct {
 }
 
 func (a *ArchEntryFile) String() string {
-	return fmt.Sprintf("[path:%s date:%v size:%v]", a.Path, a.Sdate, a.Sz)
+	return fmt.Sprintf("[path:%s date:%v size:%d]", a.Path, a.Sdate, a.Sz)
 }
 
 type TimeEntrySlice []ArchEntryFile

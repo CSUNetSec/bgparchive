@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/bzip2"
+	"encoding/binary"
 	"encoding/gob"
 	"encoding/hex"
 	"encoding/json"
@@ -12,8 +13,8 @@ import (
 	"github.com/CSUNetSec/bgparchive/api"
 	pb "github.com/CSUNetSec/netsec-protobufs/protocol/bgp"
 	pp "github.com/CSUNetSec/protoparse"
-	//ppbgp "github.com/CSUNetSec/protoparse/protocol/bgp"
 	ppmrt "github.com/CSUNetSec/protoparse/protocol/mrt"
+	"github.com/golang/protobuf/proto"
 	"github.com/rogpeppe/fastuuid"
 	"io"
 	"io/ioutil"
@@ -32,7 +33,9 @@ import (
 const (
 	HELPSTR = `Welcome to the bgpmon.io historical BGP data and stats archive.
 	We serve data from the routeviews and bgpmon collectors with a refresh time of maximum 30 minutes since the minute of collection.
-	Our interface supports GETs with parameters being time ranges. The return binary data are BGP messages in MRT format or statistics about them.
+	Our interface supports GETs with parameters being time ranges. The return binary data are BGP messages in MRT, JSON, or protocol buffer format,
+	or statistics about them. the protocol buffers are sent prepended by a uint32 bigendian that has their octet length and then the octets of the message.
+	The protocol buffer specification is at: https://github.com/CSUNetSec/netsec-protobufs/blob/master/bgpmon/bgpmon.proto (message BGPCapture)
 	We provide collected BGP updates and RIB dumps under different paths. Below are examples of usage:
 	All examples below apply to the routeviews2 collector.
 	In the end of this message there is a list of the collector names we currently serve.
@@ -40,6 +43,10 @@ const (
 		curl -o updates http://bgpmon.io/archive/mrt/routeviews2/updates?start=20130101000000\&end=20130101010000
 	fetching all RIBs from the routeviews-bgpdata2 collector exported from 01/01/2013 00:00:00 to 01/01/2013 01:00:00 UTC
 		curl -o ribs http://bgpmon.io/archive/mrt/routeviews2/ribs?start=20130101000000\&end=20130101010000
+	fetching updates as JSON from the routeviews2 collector 01/01/2013 00:00:00 to 01/01/2013 01:00:00 UTC
+		curl -o updates http://bgpmon.io/archive/json/routeviews2/updates?start=20130101000000\&end=20130101010000
+	fetching updates as protocol buffers from the routeviews2 collector 01/01/2013 00:00:00 to 01/01/2013 01:00:00 UTC
+		curl -o updates http://bgpmon.io/archive/pb/routeviews2/updates?start=20130101000000\&end=20130101010000
 	see the date range an archive spans
 		curl http://bgpmon.io/archive/mrt/routeviews2/updates/conf?range
 	start a continuous pull. The header will contain the UUID for each consecutive pull under the field Next-Pull-ID.
@@ -107,6 +114,15 @@ type BgpStats struct {
 //to know when we should close the channel to end the http transaction
 type archive interface {
 	Query(time.Time, time.Time, chan api.Reply, *sync.WaitGroup)
+}
+
+type contpuller interface {
+	getContextChans() (chan contCmd, chan contCli)
+}
+
+type contarchive interface {
+	archive
+	contpuller
 }
 
 //implements Sort interface by time.Time
@@ -188,6 +204,10 @@ type fsarchive struct {
 	api.PutNotAllowed
 	api.PostNotAllowed
 	api.DeleteNotAllowed
+}
+
+func (f *fsarchive) getContextChans() (chan contCmd, chan contCli) {
+	return f.contctx.reqch, f.contctx.repch
 }
 
 func (f *fsarchive) GetDateRangeString() string {
@@ -437,6 +457,23 @@ type mrtarchive struct {
 	api.DeleteNotAllowed
 }
 
+//pbarchive is an fsarcihve that calls the protobuf transformer on query
+type pbarchive struct {
+	*fsarchive
+}
+
+type jsonarchive struct {
+	*fsarchive
+}
+
+func NewPbArchive(a *fsarchive) *pbarchive {
+	return &pbarchive{a}
+}
+
+func NewJsonArchive(a *fsarchive) *jsonarchive {
+	return &jsonarchive{a}
+}
+
 type MrtArchives []*mrtarchive
 
 func (m *mrtarchive) GetFsArchive() *fsarchive {
@@ -568,7 +605,7 @@ func timeToString(a time.Time) string {
 	return a.UTC().Format("20060102150405")
 }
 
-func (fsa *mrtarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
+func handleParams(values url.Values, ar contarchive) (api.HdrReply, chan api.Reply) {
 	var (
 		grwg sync.WaitGroup
 		defh api.HdrReply
@@ -583,9 +620,10 @@ func (fsa *mrtarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 		ip = []string{"IP error"}
 	}
 	if !ok1 {
-		return getTimerange(values, fsa, defh)
+		return getTimerange(values, ar, defh)
 	}
 	retc := make(chan api.Reply)
+	creqch, crepch := ar.getContextChans()
 	//continuous has to be only by itself or with a start on a request
 	if ok3 || len(contid) > 1 {
 		grwg.Add(1)
@@ -596,8 +634,8 @@ func (fsa *mrtarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 	case "begin":
 		log.Printf("register request handler for cli %s", ip[0])
 		arg := contCli{ip: ip[0]}
-		fsa.contctx.reqch <- contCmd{cmd: CONT_ADD, cli: arg}
-		rep := <-fsa.contctx.repch
+		creqch <- contCmd{cmd: CONT_ADD, cli: arg}
+		rep := <-crepch
 		if rep.err == nil {
 			log.Printf("register api.Reply handler for cli %+v", rep)
 			defh.Extra = rep.id
@@ -605,7 +643,7 @@ func (fsa *mrtarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 			if ok2 {
 				//we create a string of the current time.
 				values["end"] = []string{timeToString(time.Now())}
-				return getTimerange(values, fsa, defh)
+				return getTimerange(values, ar, defh)
 			}
 		} else {
 			log.Printf("error :%s", rep.err)
@@ -616,13 +654,13 @@ func (fsa *mrtarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 	default:
 		log.Printf("will query handler %s for cli %s", contid[0], ip[0])
 		arg := contCli{ip: ip[0], id: contid[0]}
-		fsa.contctx.reqch <- contCmd{cmd: CONT_GET, cli: arg}
-		rep := <-fsa.contctx.repch
+		creqch <- contCmd{cmd: CONT_GET, cli: arg}
+		rep := <-crepch
 		if rep.err == nil {
 			log.Printf("sending next id for cli %+v", rep)
 			defh.Extra = rep.id
 			if !rep.t2pull.IsZero() { //
-				fsa.Query(rep.t1pull, rep.t2pull, retc, &grwg)
+				ar.Query(rep.t1pull, rep.t2pull, retc, &grwg)
 				goto done
 			}
 		} else {
@@ -639,7 +677,23 @@ done:
 		log.Printf("closing the chan\n")
 	}(&grwg)
 	return defh, retc
+
 }
+
+func (fsa *fsarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
+	return handleParams(values, fsa)
+}
+
+func (pba *pbarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
+	return handleParams(values, pba)
+}
+
+func (jsa *jsonarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
+	return handleParams(values, jsa)
+}
+
+//func (fsa *mrtarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
+//}
 
 func (fss *fsarstat) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 	return getTimerange(values, fss, api.HdrReply{Code: 200})
@@ -713,59 +767,142 @@ func (ma *fsarchive) getij(ta, tb time.Time) (int, int, error) {
 	return i, j, nil
 }
 
-func (ma *mrtarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
+type transformer func([]byte) ([]byte, error)
+
+func newIdentityTransformer() transformer {
+	return func(a []byte) ([]byte, error) {
+		return a, nil
+	}
+}
+
+func newProtobufTransformer() transformer {
+	return func(a []byte) ([]byte, error) {
+		bb := new(bytes.Buffer)
+		pb, err := ppmrt.MrtToBGPCapture(a)
+		if err != nil {
+			return nil, err
+		}
+		pbytes, err := proto.Marshal(pb)
+		if err != nil {
+			return nil, err
+		}
+		blen := uint32(len(pbytes))
+		binary.Write(bb, binary.BigEndian, blen)
+		bb.Write(pbytes)
+		return bb.Bytes(), nil
+	}
+}
+
+func newJsonTransformer() transformer {
+	return func(a []byte) ([]byte, error) {
+		mrth := ppmrt.NewMrtHdrBuf(a)
+		bgp4h, err := mrth.Parse()
+		if err != nil {
+			log.Printf("Failed parsing MRT header:%s", err)
+		}
+		bgph, err := bgp4h.Parse()
+		if err != nil {
+			log.Printf("Failed parsing BG4MP header:%s", err)
+		}
+		bgpup, err := bgph.Parse()
+		if err != nil {
+			log.Printf("Failed parsing BGP header:%s", err)
+		}
+		_, err = bgpup.Parse()
+		if err != nil {
+			log.Printf("Failed parsing BGP update:%s", err)
+		}
+		mbs := &ppmrt.MrtBufferStack{mrth, bgp4h, bgph, bgpup}
+		mbsj, err := json.Marshal(mbs)
+		mbsj = append(mbsj, []byte("\n")...)
+		return []byte(mbsj), nil
+	}
+}
+func transformAndSendBytes(ar *fsarchive, ta, tb time.Time, rc chan<- api.Reply, trans transformer) {
+	i, j, err := ar.getij(ta, tb)
+
+	if err != nil {
+		rc <- api.Reply{nil, err}
+		return
+	}
+	ef := *ar.entryfiles
+
+	for k := i; k < j; k++ {
+		if ar.debug {
+			log.Printf("opening:%s", ef[k].Path)
+		}
+		file, ferr := os.Open(ef[k].Path)
+		if ferr != nil {
+			log.Println("failed opening file: ", ef[k].Path, " ", ferr)
+			continue
+		}
+		scanner := getScanner(file)
+		startt := time.Now()
+		for scanner.Scan() {
+			data := scanner.Bytes()
+
+			hdrbuf := ppmrt.NewMrtHdrBuf(data)
+			_, err := hdrbuf.Parse()
+			if err != nil {
+				log.Printf("error in creating MRT header:%s", err)
+				rc <- api.Reply{Data: nil, Err: err}
+				continue
+			}
+			hdr := hdrbuf.GetHeader()
+			msgtime := time.Unix(int64(hdr.Timestamp), 0)
+			if msgtime.After(ta.Add(-time.Second)) && msgtime.Before(tb.Add(time.Second)) {
+				//documenation was saying that the Bytes() returnned from a scanner
+				//can be overwritten by subsequent calls to Scan().
+				//if we don't copy the bytes here, we have an awful race.
+				if trans != nil {
+					data, err = trans(data)
+				}
+				cp := make([]byte, len(data))
+				copy(cp, data)
+				rc <- api.Reply{Data: cp, Err: err}
+			}
+		}
+		if err := scanner.Err(); err != nil && err != io.EOF {
+			log.Printf("file scanner error:%s\n", err)
+		}
+		log.Printf("finished parsing file %s size %d in %s\n", ef[k].Path, ef[k].Sz, time.Since(startt))
+		file.Close()
+	}
+
+}
+
+func (ma *fsarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
 	log.Printf("mrt query from %s to %s\n", ta, tb)
 	//Always add to the waitgroup before calling the go statement.
 	wg.Add(1)
 	go func(rc chan<- api.Reply) {
 		defer wg.Done()
-		i, j, err := ma.getij(ta, tb)
+		it := newIdentityTransformer()
+		transformAndSendBytes(ma, ta, tb, rc, it)
+		return
+	}(retc)
+}
 
-		if err != nil {
-			rc <- api.Reply{nil, err}
-			return
-		}
-		ef := *ma.entryfiles
+func (pba *pbarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
+	log.Printf("protobuf query from %s to %s\n", ta, tb)
+	//Always add to the waitgroup before calling the go statement.
+	wg.Add(1)
+	go func(rc chan<- api.Reply) {
+		defer wg.Done()
+		pt := newProtobufTransformer()
+		transformAndSendBytes(pba.fsarchive, ta, tb, rc, pt)
+		return
+	}(retc)
+}
 
-		for k := i; k < j; k++ {
-			if ma.debug {
-				log.Printf("opening:%s", ef[k].Path)
-			}
-			file, ferr := os.Open(ef[k].Path)
-			if ferr != nil {
-				log.Println("failed opening file: ", ef[k].Path, " ", ferr)
-				continue
-			}
-			scanner := getScanner(file)
-			startt := time.Now()
-			for scanner.Scan() {
-				data := scanner.Bytes()
-
-				hdrbuf := ppmrt.NewMrtHdrBuf(data)
-				_, err := hdrbuf.Parse()
-				if err != nil {
-					log.Printf("error in creating MRT header:%s", err)
-					rc <- api.Reply{Data: nil, Err: err}
-					continue
-				}
-				hdr := hdrbuf.GetHeader()
-				msgtime := time.Unix(int64(hdr.Timestamp), 0)
-				if msgtime.After(ta.Add(-time.Second)) && msgtime.Before(tb.Add(time.Second)) {
-					//documenation was saying that the Bytes() returnned from a scanner
-					//can be overwritten by subsequent calls to Scan().
-					//if we don't copy the bytes here, we have an awful race.
-					cp := make([]byte, len(data))
-					copy(cp, data)
-					rc <- api.Reply{Data: cp, Err: nil}
-				}
-			}
-			if err := scanner.Err(); err != nil && err != io.EOF {
-				log.Printf("file scanner error:%s\n", err)
-			}
-			log.Printf("finished parsing file %s size %d in %s\n", ef[k].Path, ef[k].Sz, time.Since(startt))
-			file.Close()
-		}
-
+func (jsa *jsonarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
+	log.Printf("json query from %s to %s\n", ta, tb)
+	//Always add to the waitgroup before calling the go statement.
+	wg.Add(1)
+	go func(rc chan<- api.Reply) {
+		defer wg.Done()
+		jt := newJsonTransformer()
+		transformAndSendBytes(jsa.fsarchive, ta, tb, rc, jt)
 		return
 	}(retc)
 }

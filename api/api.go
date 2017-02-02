@@ -2,17 +2,17 @@ package api
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
-	"log"
 )
 
 const (
-	GET     = "GET"
-	PUT     = "PUT"
-	POST    = "POST"
-	DELETE  = "DELETE"
+	GET    = "GET"
+	PUT    = "PUT"
+	POST   = "POST"
+	DELETE = "DELETE"
 )
 
 //we now need to wrap the integer HTTP Reply code in this struct

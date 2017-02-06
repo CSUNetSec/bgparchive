@@ -112,13 +112,22 @@ func (h *HelpMsg) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 		defer close(retc)
 		retc <- api.Reply{Data: []byte(fmt.Sprintf("%s\n", HELPSTR)), Err: nil}
 		for i := range h.ars {
-			arstr := fmt.Sprintf("\t%-8s archive: %-25s\trange:%s", strings.ToLower(h.ars[i].descriminator), h.ars[i].GetCollectorString(), h.ars[i].GetDateRangeString())
+			arstr := fmt.Sprintf("\t%-8s archive: %-25s\trange:%s", riborupdatestr(h.ars[i].descriminator), h.ars[i].GetCollectorString(), h.ars[i].GetDateRangeString())
 			retc <- api.Reply{Data: []byte(arstr), Err: nil}
 		}
 		return
 	}()
 	return api.HdrReply{Code: 200}, retc
 
+}
+
+func riborupdatestr(a string) string {
+	switch a {
+	case "table":
+		return "ribs"
+	}
+
+	return strings.ToLower(a)
 }
 
 func (h *HelpMsg) AddArchive(ar *fsarconf) {

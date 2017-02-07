@@ -605,8 +605,18 @@ func getTimerange(values url.Values, ar archive, h api.HdrReply) (api.HdrReply, 
 	for i := 0; i < len(timeAstrs); i++ {
 		log.Printf("timeAstr:%s timeBstr:%s .Current server time:%v", timeAstrs[i], timeBstrs[i], time.Now())
 		timeA, errtime := time.Parse("20060102150405", timeAstrs[i])
-		timeB, errtime := time.Parse("20060102150405", timeBstrs[i])
+		timeB, errtime1 := time.Parse("20060102150405", timeBstrs[i])
 		log.Printf("1:%v %v", timeA, timeB)
+		if errtime != nil || errtime1 != nil {
+			log.Printf("date parse error A:%s B:%s", errtime, errtime1)
+			grwg.Add(1)
+			go func() {
+				defer grwg.Done()
+				retc <- api.Reply{Data: nil, Err: errors.New(fmt.Sprintf("%s .Current server time:%v", errbaddate, time.Now()))}
+			}()
+			goto done
+
+		}
 		if errtime != nil || timeB.Before(timeA) {
 			log.Printf("warning: TimeB before TimeA")
 			grwg.Add(1)

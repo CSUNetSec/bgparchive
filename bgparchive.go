@@ -249,7 +249,7 @@ func (f *fsarchive) GetDateRangeString() string {
 		dates := fmt.Sprintf("%s - %s\n", files[0].Sdate, files[len(files)-1].Sdate)
 		return dates
 	}
-	return "archive is empty"
+	return "archive is empty\n"
 }
 
 func (f *fsarchive) GetCollectorString() string {
@@ -759,7 +759,29 @@ func getFirstDate(fname string) (t time.Time, err error) {
 	scanner.Scan()
 	err = scanner.Err()
 	if err != nil {
-		log.Printf("getFirstDate scanner error")
+		if err == bufio.ErrTooLong { //could be a RIB
+			var (
+				nb      int
+				errread error
+			)
+			hdbuf := make([]byte, ppmrt.MRT_HEADER_LEN)
+			nb, errread = file.Read(hdbuf)
+			if nb != ppmrt.MRT_HEADER_LEN || errread != nil {
+				err = fmt.Errorf("RIB file read error. less bytes or %s", errread)
+				return
+			}
+			hdrbuf := ppmrt.NewMrtHdrBuf(hdbuf)
+			_, err = hdrbuf.Parse()
+			if err != nil {
+				log.Printf("getFirstDate error in creating MRT header:%s", err)
+				return
+			}
+			hdr := hdrbuf.GetHeader()
+			t = time.Unix(int64(hdr.Timestamp), 0)
+			//log.Printf("getFirstDate got header with time:%v", t)
+			return
+		}
+		log.Printf("getFirstDate scanner error:%s", err)
 		return
 	}
 	data := scanner.Bytes()
@@ -810,6 +832,12 @@ func newIdentityTransformer() transformer {
 
 func newProtobufTransformer() transformer {
 	return func(a []byte) ([]byte, error) {
+		//check if it is a rib
+		isrib, _ := ppmrt.IsRib(a)
+		if isrib {
+			return nil, fmt.Errorf("Protobuf RIB output is not yet supported")
+		}
+
 		bb := new(bytes.Buffer)
 		pb, err := ppmrt.MrtToBGPCapture(a)
 		if err != nil {
@@ -833,17 +861,25 @@ func newJsonTransformer() transformer {
 		if err != nil {
 			log.Printf("Failed parsing MRT header:%s", err)
 		}
+		//check if it is a rib
+		isrib, _ := ppmrt.IsRib(a)
+		if isrib {
+			return nil, fmt.Errorf("JSON RIB output is not yet supported")
+		}
 		bgph, err := bgp4h.Parse()
 		if err != nil {
 			log.Printf("Failed parsing BG4MP header:%s", err)
+			return nil, err
 		}
 		bgpup, err := bgph.Parse()
 		if err != nil {
 			log.Printf("Failed parsing BGP header:%s", err)
+			return nil, err
 		}
 		_, err = bgpup.Parse()
 		if err != nil {
 			log.Printf("Failed parsing BGP update:%s", err)
+			return nil, err
 		}
 		mbs := &ppmrt.MrtBufferStack{mrth, bgp4h, bgph, bgpup}
 		mbsj, err := json.Marshal(mbs)

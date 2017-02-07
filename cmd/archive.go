@@ -22,6 +22,7 @@ var (
 	flag_savepath        string
 	flag_debug           bool
 	flag_conffile        string
+	flag_port            int
 )
 
 type descpath struct {
@@ -64,6 +65,7 @@ func init() {
 	flag.StringVar(&flag_savepath, "savepath", ".", "directory to save the binary archive index files")
 	flag.StringVar(&flag_conffile, "conf", "", "configuration file")
 	flag.BoolVar(&flag_debug, "debug", false, "turn on debugging")
+	flag.IntVar(&flag_port, "port", 80, "default port for the HTTP server to bind to")
 }
 
 func main() {
@@ -124,7 +126,7 @@ func main() {
 	allscanwg.Wait()
 	//the global help message
 	api.AddResource(hmsg, "/archive/help")
-	api.Start(80)
+	api.Start(flag_port)
 	for _, v := range ars {
 		rc := v.GetReqChan()
 		close(rc)

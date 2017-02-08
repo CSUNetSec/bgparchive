@@ -796,7 +796,7 @@ func getFirstDate(fname string) (t time.Time, err error) {
 	}
 	data := scanner.Bytes()
 	if len(data) < ppmrt.MRT_HEADER_LEN {
-		log.Printf("mrt scanner in getFirstDate returned less bytes than the minimum header")
+		log.Printf("getFirstDate on %s MRT scanner returned less bytes (%d) than the minimum header", fname, len(data))
 		return time.Now(), errors.New(fmt.Sprintf("too few bytes read from mrtfile:%s", fname))
 	}
 

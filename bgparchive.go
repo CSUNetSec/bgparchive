@@ -31,38 +31,62 @@ import (
 )
 
 const (
-	HELPSTR = `Welcome to the bgpmon.io historical BGP data and stats archive.
-	We serve data from the routeviews and bgpmon collectors with a refresh time of maximum 30 minutes since the minute of collection.
-	Our interface supports GETs with parameters being time ranges. The return binary data are BGP messages in MRT, JSON, or protocol buffer format,
-	or statistics about them. the protocol buffers are sent prepended by a uint32 bigendian that has their octet length and then the octets of the message.
-	The protocol buffer specification is at: https://github.com/CSUNetSec/netsec-protobufs/blob/master/bgpmon/bgpmon.proto (message BGPCapture)
-	We provide collected BGP updates and RIB dumps under different paths. Below are examples of usage:
-	All examples below apply to the routeviews2 collector.
-	In the end of this message there is a list of the collector names we currently serve.
-	fetching updates from the routeviews2 collector 01/01/2013 00:00:00 to 01/01/2013 01:00:00 UTC
-		curl -o updates http://bgpmon.io/archive/mrt/routeviews2/updates?start=20130101000000\&end=20130101010000
-	fetching all RIBs from the routeviews-bgpdata2 collector exported from 01/01/2013 00:00:00 to 01/01/2013 01:00:00 UTC
-		curl -o ribs http://bgpmon.io/archive/mrt/routeviews2/ribs?start=20130101000000\&end=20130101010000
-	fetching updates as JSON from the routeviews2 collector 01/01/2013 00:00:00 to 01/01/2013 01:00:00 UTC
-		curl -o updates http://bgpmon.io/archive/json/routeviews2/updates?start=20130101000000\&end=20130101010000
-	fetching updates as protocol buffers from the routeviews2 collector 01/01/2013 00:00:00 to 01/01/2013 01:00:00 UTC
-		curl -o updates http://bgpmon.io/archive/pb/routeviews2/updates?start=20130101000000\&end=20130101010000
-	see the date range an archive spans
-		curl http://bgpmon.io/archive/mrt/routeviews2/updates/conf?range
-	start a continuous pull. The header will contain the UUID for each consecutive pull under the field Next-Pull-ID.
-		curl -v http://bgpmon.io/archive/mrt/routeviews2/updates?continuous=begin
-	or you can also specify a start time and the continuous mode. This would bring you everything from the start time till the time of 
-        the request as well as give you back an ID for the next request.
-		curl -v http://bgpmon.io/archive/mrt/routeviews2/updates?continuous=begin\&start=20151105000000
-	and then once we get the id
-		curl -v -o updates http://bgpmon.io/archive/mrt/routeviews2/updates?continuous=115786068dca20709955f88faa71d241
-	(the state will timeout in 30 minutes if left inactive, so after that you need to start a new session)
-	help message
-		curl http://bgpmon.io/archive/help
-	the files that back the archive
-		curl http://bgpmon.io/archive/mrt/routeviews2/updates/conf?files
-	Get JSON encoded statistics about the requested time range
-		curl http://bgpmon.io/archive/mrt/routeviews2/updates/stats?start=20130101000000\&end=20130101010000
+	HELPSTR = `
+					Welcome to the BGPMon.io archive
+					================================
+	This archive serves data from BGP collectors around the world operated by RouteViews and BGPMon.io.
+
+	The interface supports data retrieval based on a timerange. You may retrieve (a) BGP update messages in various formats, indluding MRT, JSON and protocol buffers, (b) BGP RIBs or (c) BGP update message statistics.
+	The protocol buffer specification can be found at: https://github.com/CSUNetSec/netsec-protobufs/blob/master/bgpmon/bgpmon.proto (message BGPCapture).
+
+	IMPORTANT NOTE: BGP data can be large. For example, one hour's worth of updates from routeviews2 can be around 8MB. RIBs are larger. Please exercise care when making requests for long time ranges.
+
+	Start and end times are specified in the YYYMMDDMMSS format.
+
+	Below are examples of how to use the interface. You may fetch data from one collector at a time. All examples below fetch data from the routeviews2 collector (currently the largest collector).
+
+	Run the following first to get this help message, a current list of available collectors and the time range they serve:
+	curl http://bgpmon.io/archive/help
+
+	Fetch updates in MRT format from 01/01/2013 00:00:00 to 01/01/2013 01:00:00 UTC:
+	curl -o updates http://bgpmon.io/archive/mrt/routeviews2/updates?start=20130101000000\&end=20130101010000
+
+	Fetch updates in JSON format from 01/01/2013 00:00:00 to 01/01/2013 01:00:00 UTC:
+	curl -o updates http://bgpmon.io/archive/json/routeviews2/updates?start=20130101000000\&end=20130101010000
+
+	Fetch updates as protocol buffers from 01/01/2013 00:00:00 to 01/01/2013 01:00:00 UTC:
+	curl -o updates http://bgpmon.io/archive/pb/routeviews2/updates?start=20130101000000\&end=20130101010000
+
+	Start a continuous pull for updates. The HTTP return header contains the UUID for each consecutive pull under the field Next-Pull-ID:
+	curl -v http://bgpmon.io/archive/mrt/routeviews2/updates?continuous=begin
+
+	Specify a start time in continuous mode. This will bring everything from the specified start time until the time of the request, including an ID to use for the next request:
+	curl -v http://bgpmon.io/archive/mrt/routeviews2/updates?continuous=begin\&start=20151105000000
+
+	Then once we get the id:
+	curl -v -o updates http://bgpmon.io/archive/mrt/routeviews2/updatescontinuous=115786068dca20709955f88faa71d241
+	Note that the state will timeout after 30 minutes of inactivity and you will need to start a new session.
+
+	Fetch all RIBs exported from 01/01/2013 00:00:00 to 01/01/2013 01:00:00 UTC:
+	curl -o ribs http://bgpmon.io/archive/mrt/routeviews2/ribs?start=20130101000000\&end=20130101010000
+
+	See the date range of a particular collector:
+	curl http://bgpmon.io/archive/mrt/routeviews2/updates/conf?range
+
+	Get the original MRT file names from the the archive back end:
+	curl http://bgpmon.io/archive/mrt/routeviews2/updates/conf?files
+
+	Get JSON-encoded statistics about the requested time range in the following format:
+	<# of all types of all messages in the requested time range>
+	followed by a matrix with three rows and a # columns equal to the number of seconds in the requested interval
+	row 0 - # of all types messages: <# of all types of messages at sec 0>, <# of all messages at sec 1>, ...
+	row 1 - # of MPReach   messages: <# of MPReach messages at sec 0>, <# of MPReach at sec 1>, ...
+	row 2 - # of MPUnreach messages: <# of MPUnreach messages at sec 0>, <# of MPUnreach messages at sec 1>, ...
+
+	curl http://bgpmon.io/archive/mrt/routeviews2/updates/stats?start=20160101000000\&end=20160101010000
+
+	Collectors and their time range:
+
 	`
 )
 
@@ -88,13 +112,22 @@ func (h *HelpMsg) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 		defer close(retc)
 		retc <- api.Reply{Data: []byte(fmt.Sprintf("%s\n", HELPSTR)), Err: nil}
 		for i := range h.ars {
-			arstr := fmt.Sprintf("\n archive: %s\trange:%s\n", h.ars[i].GetCollectorString(), h.ars[i].GetDateRangeString())
+			arstr := fmt.Sprintf("\t%-8s archive: %-25s\trange:%s", riborupdatestr(h.ars[i].descriminator), h.ars[i].GetCollectorString(), h.ars[i].GetDateRangeString())
 			retc <- api.Reply{Data: []byte(arstr), Err: nil}
 		}
 		return
 	}()
 	return api.HdrReply{Code: 200}, retc
 
+}
+
+func riborupdatestr(a string) string {
+	switch a {
+	case "table":
+		return "ribs"
+	}
+
+	return strings.ToLower(a)
 }
 
 func (h *HelpMsg) AddArchive(ar *fsarconf) {
@@ -138,7 +171,7 @@ type ArchEntryFile struct {
 	Offsets []EntryOffset
 }
 
-func (a *ArchEntryFile) String() string {
+func (a ArchEntryFile) String() string {
 	return fmt.Sprintf("[path:%s date:%v size:%d offsets:%v]", a.Path, a.Sdate, a.Sz, a.Offsets)
 }
 
@@ -222,7 +255,7 @@ func (f *fsarchive) GetDateRangeString() string {
 		dates := fmt.Sprintf("%s - %s\n", files[0].Sdate, files[len(files)-1].Sdate)
 		return dates
 	}
-	return "archive is empty"
+	return "archive is empty\n"
 }
 
 func (f *fsarchive) GetCollectorString() string {
@@ -578,8 +611,18 @@ func getTimerange(values url.Values, ar archive, h api.HdrReply) (api.HdrReply, 
 	for i := 0; i < len(timeAstrs); i++ {
 		log.Printf("timeAstr:%s timeBstr:%s .Current server time:%v", timeAstrs[i], timeBstrs[i], time.Now())
 		timeA, errtime := time.Parse("20060102150405", timeAstrs[i])
-		timeB, errtime := time.Parse("20060102150405", timeBstrs[i])
+		timeB, errtime1 := time.Parse("20060102150405", timeBstrs[i])
 		log.Printf("1:%v %v", timeA, timeB)
+		if errtime != nil || errtime1 != nil {
+			log.Printf("date parse error A:%s B:%s", errtime, errtime1)
+			grwg.Add(1)
+			go func() {
+				defer grwg.Done()
+				retc <- api.Reply{Data: nil, Err: errors.New(fmt.Sprintf("%s .Current server time:%v", errbaddate, time.Now()))}
+			}()
+			goto done
+
+		}
 		if errtime != nil || timeB.Before(timeA) {
 			log.Printf("warning: TimeB before TimeA")
 			grwg.Add(1)
@@ -732,12 +775,34 @@ func getFirstDate(fname string) (t time.Time, err error) {
 	scanner.Scan()
 	err = scanner.Err()
 	if err != nil {
-		log.Printf("getFirstDate scanner error")
+		if err == bufio.ErrTooLong { //could be a RIB
+			var (
+				nb      int
+				errread error
+			)
+			hdbuf := make([]byte, ppmrt.MRT_HEADER_LEN)
+			nb, errread = file.Read(hdbuf)
+			if nb != ppmrt.MRT_HEADER_LEN || errread != nil {
+				err = fmt.Errorf("RIB file read error. less bytes or %s", errread)
+				return
+			}
+			hdrbuf := ppmrt.NewMrtHdrBuf(hdbuf)
+			_, err = hdrbuf.Parse()
+			if err != nil {
+				log.Printf("getFirstDate error in creating MRT header:%s", err)
+				return
+			}
+			hdr := hdrbuf.GetHeader()
+			t = time.Unix(int64(hdr.Timestamp), 0)
+			//log.Printf("getFirstDate got header with time:%v", t)
+			return
+		}
+		log.Printf("getFirstDate scanner error:%s", err)
 		return
 	}
 	data := scanner.Bytes()
 	if len(data) < ppmrt.MRT_HEADER_LEN {
-		log.Printf("mrt scanner in getFirstDate returned less bytes than the minimum header")
+		log.Printf("getFirstDate on %s MRT scanner returned less bytes (%d) than the minimum header", fname, len(data))
 		return time.Now(), errors.New(fmt.Sprintf("too few bytes read from mrtfile:%s", fname))
 	}
 
@@ -753,7 +818,7 @@ func getFirstDate(fname string) (t time.Time, err error) {
 	return
 }
 
-func (ma *fsarchive) getFileIndexRange(ta, tb time.Time) (int, int, int, error) {
+func (ma *fsarchive) getFileIndexRange(ta, tb time.Time) (int, int, int64, error) {
 	ef := *ma.entryfiles
 	if len(ef) == 0 {
 		return 0, 0, 0, errempty
@@ -770,13 +835,16 @@ func (ma *fsarchive) getFileIndexRange(ta, tb time.Time) (int, int, int, error) 
 
 	//This code finds the index of the offset where the request is starting.
 	// offsets[k] < ta < offsets[k+1]
-	var k int = 0
-	if ef[i].Offsets != nil {
-		for k = 0; k < len(ef[i].Offsets)-1; k++ {
-			if ef[i].Offsets[k].Time.Before(ta) && ef[i].Offsets[k+1].Time.After(ta) {
-				break
+	var k int64 = 0
+	if ef[i].Offsets != nil && ef[i].Offsets[0].Time.Before(ta) {
+		for ind := 0; ind < len(ef[i].Offsets)-1 && k == 0; ind++ {
+			if ef[i].Offsets[ind].Time.Before(ta.Add(time.Second)) && ef[i].Offsets[ind+1].Time.After(ta) {
+				k = ef[i].Offsets[ind].Pos
+				log.Printf("Seeking to offset %d:%d\n", ind, k)
 			}
 		}
+	} else {
+		log.Printf("=====NO SEEKING======\n")
 	}
 
 	if ma.debug {
@@ -795,6 +863,12 @@ func newIdentityTransformer() transformer {
 
 func newProtobufTransformer() transformer {
 	return func(a []byte) ([]byte, error) {
+		//check if it is a rib
+		isrib, _ := ppmrt.IsRib(a)
+		if isrib {
+			return nil, fmt.Errorf("Protobuf RIB output is not yet supported")
+		}
+
 		bb := new(bytes.Buffer)
 		pb, err := ppmrt.MrtToBGPCapture(a)
 		if err != nil {
@@ -818,17 +892,25 @@ func newJsonTransformer() transformer {
 		if err != nil {
 			log.Printf("Failed parsing MRT header:%s", err)
 		}
+		//check if it is a rib
+		isrib, _ := ppmrt.IsRib(a)
+		if isrib {
+			return nil, fmt.Errorf("JSON RIB output is not yet supported")
+		}
 		bgph, err := bgp4h.Parse()
 		if err != nil {
 			log.Printf("Failed parsing BG4MP header:%s", err)
+			return nil, err
 		}
 		bgpup, err := bgph.Parse()
 		if err != nil {
 			log.Printf("Failed parsing BGP header:%s", err)
+			return nil, err
 		}
 		_, err = bgpup.Parse()
 		if err != nil {
 			log.Printf("Failed parsing BGP update:%s", err)
+			return nil, err
 		}
 		mbs := &ppmrt.MrtBufferStack{mrth, bgp4h, bgph, bgpup}
 		mbsj, err := json.Marshal(mbs)
@@ -837,7 +919,7 @@ func newJsonTransformer() transformer {
 	}
 }
 func transformAndSendBytes(ar *fsarchive, ta, tb time.Time, rc chan<- api.Reply, trans transformer) {
-	i, j, offInd, err := ar.getFileIndexRange(ta, tb)
+	i, j, offPos, err := ar.getFileIndexRange(ta, tb)
 
 	if err != nil {
 		rc <- api.Reply{nil, err}
@@ -857,9 +939,8 @@ func transformAndSendBytes(ar *fsarchive, ta, tb time.Time, rc chan<- api.Reply,
 		scanner := getScanner(file)
 		startt := time.Now()
 		// On the first file scanned, jump to the offset position
-		if k == i && ef[i].Offsets != nil {
-			file.Seek(ef[i].Offsets[offInd].Pos, 0)
-			log.Printf("Jumping to index: %d\n", offInd)
+		if k == i {
+			file.Seek(offPos, 0)
 		}
 		for scanner.Scan() {
 			data := scanner.Bytes()
@@ -946,7 +1027,7 @@ func (fss *fsarstat) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitG
 		)
 		defer wg.Done()
 		ma := fss.fsarchive
-		i, j, offInd, err := ma.getFileIndexRange(ta, tb)
+		i, j, offPos, err := ma.getFileIndexRange(ta, tb)
 
 		if err != nil {
 			rc <- api.Reply{nil, err}
@@ -966,9 +1047,7 @@ func (fss *fsarstat) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitG
 			startt := time.Now()
 			if k == i { //only on the first file to be examined
 				lastTime = ta //set it to the beginning of interval
-				if ef[i].Offsets != nil {
-					file.Seek(ef[i].Offsets[offInd].Pos, 0)
-				}
+				file.Seek(offPos, 0)
 			}
 			for scanner.Scan() {
 				data := scanner.Bytes()

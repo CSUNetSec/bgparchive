@@ -14,6 +14,7 @@ import (
 	pbmrt "github.com/CSUNetSec/protoparse/protocol/mrt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -56,31 +57,56 @@ func main() {
 	flag.Parse()
 	args := flag.Args()
 
-	if len(args) != 1 {
+	if len(args) < 1 {
 		usage()
 		return
 	}
-
-	entries := bgp.TimeEntrySlice{}
-	err := (&entries).FromGobFile(args[0])
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
 	if print_tes {
-		for _, ent := range entries {
-			fmt.Printf("%s\n", ent)
+		for _, tesName := range args {
+			fmt.Println("------ %s ------\n", tesName)
+			err := printTes(tesName)
+			if err != nil {
+				fmt.Printf("Print error: %v\n", err)
+			}
+			fmt.Printf("\n")
 		}
-		return
+	} else {
+		var wg sync.WaitGroup
+
+		for _, tesName := range args {
+			wg.Add(1)
+			go indexTESFile(tesName, wg)
+		}
+		wg.Wait()
 	}
 
-	if output_name == "" {
-		output_name = args[0] + "-index"
+}
+
+func printTes(tesName string) error {
+	entries := bgp.TimeEntrySlice{}
+	err := (&entries).FromGobFile(tesName)
+	if err != nil {
+		return err
 	}
+	for _, ent := range entries {
+		fmt.Printf("%s\n", ent)
+	}
+	return nil
+}
+
+func indexTESFile(tesName string, wg sync.WaitGroup) {
+	defer wg.Done()
+	entries := bgp.TimeEntrySlice{}
+	err := (&entries).FromGobFile(tesName)
+	if err != nil {
+		fmt.Printf("Error opening TES: %s\n", tesName)
+		return
+	}
+	output_name = tesName + "-index"
 	for enct, _ := range entries {
 		entryfile, err := os.Open(entries[enct].Path)
 		if err != nil {
-			fmt.Printf("Error opening entry.Path: %s\n", entries[enct].Path)
+			fmt.Printf("Error opening ArchEntryFile: %s\n", entries[enct].Path)
 			return
 		}
 		m := Generate_Index(GetScanner(entryfile), entries[enct].Sz, sample_rate, getTimestampFromMRT)
@@ -93,12 +119,13 @@ func main() {
 				fmt.Printf("Null offset, should not have happened.\n")
 			}
 		}
-
+		entryfile.Close()
 	}
 	err = entries.ToGobFile(output_name)
 	if err != nil {
-		fmt.Printf("Failed to regob\n")
+		fmt.Printf("Error regobing TES: %s\n", tesName)
 	}
+	return
 }
 
 func getTimestampFromMRT(data []byte) (interface{}, error) {
@@ -148,6 +175,6 @@ func Generate_Index(scanner *bufio.Scanner, fsize int64, sample_rate float64, tr
 
 func usage() {
 	fmt.Println("indextool: writes an indexed version of a TimeEntrySlice into a specified file.")
-	fmt.Println("usage: indextool [outfile|print|rate] tes-file")
-	fmt.Println("See indextool -h for a list of options.")
+	fmt.Println("usage: indextool [flags] original-tes-file")
+	fmt.Println("See indextool -h for a list of flags.")
 }

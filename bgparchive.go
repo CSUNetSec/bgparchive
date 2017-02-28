@@ -158,15 +158,21 @@ type contarchive interface {
 	contpuller
 }
 
-//implements Sort interface by time.Time
-type ArchEntryFile struct {
-	Path  string
-	Sdate time.Time
-	Sz    int64
+type EntryOffset struct {
+	Time time.Time
+	Pos  int64
 }
 
-func (a *ArchEntryFile) String() string {
-	return fmt.Sprintf("[path:%s date:%v size:%d]", a.Path, a.Sdate, a.Sz)
+//implements Sort interface by time.Time
+type ArchEntryFile struct {
+	Path    string
+	Sdate   time.Time
+	Sz      int64
+	Offsets []EntryOffset
+}
+
+func (a ArchEntryFile) String() string {
+	return fmt.Sprintf("[path:%s date:%v size:%d offsets:%v]", a.Path, a.Sdate, a.Sz, a.Offsets)
 }
 
 type TimeEntrySlice []ArchEntryFile
@@ -812,13 +818,13 @@ func getFirstDate(fname string) (t time.Time, err error) {
 	return
 }
 
-func (ma *fsarchive) getij(ta, tb time.Time) (int, int, error) {
+func (ma *fsarchive) getFileIndexRange(ta, tb time.Time) (int, int, int64, error) {
 	ef := *ma.entryfiles
 	if len(ef) == 0 {
-		return 0, 0, errempty
+		return 0, 0, 0, errempty
 	}
 	if tb.Before(ef[0].Sdate) || ta.After(ef[len(ef)-1].Sdate.Add(ma.timedelta)) {
-		return 0, 0, errdate
+		return 0, 0, 0, errdate
 	}
 	i := sort.Search(len(ef), func(i int) bool {
 		return ef[i].Sdate.After(ta.Add(-ma.timedelta - time.Second))
@@ -826,10 +832,25 @@ func (ma *fsarchive) getij(ta, tb time.Time) (int, int, error) {
 	j := sort.Search(len(ef), func(i int) bool {
 		return ef[i].Sdate.After(tb)
 	})
+
+	//This code finds the index of the offset where the request is starting.
+	// offsets[k] < ta < offsets[k+1]
+	var k int64 = 0
+	if ef[i].Offsets != nil && ef[i].Offsets[0].Time.Before(ta) {
+		for ind := 0; ind < len(ef[i].Offsets)-1 && k == 0; ind++ {
+			if ef[i].Offsets[ind].Time.Before(ta.Add(time.Second)) && ef[i].Offsets[ind+1].Time.After(ta) {
+				k = ef[i].Offsets[ind].Pos
+				log.Printf("Seeking to offset %d:%d\n", ind, k)
+			}
+		}
+	} else {
+		log.Printf("=====NO SEEKING======\n")
+	}
+
 	if ma.debug {
 		log.Printf("indexes [i:%d j:%d]", i, j)
 	}
-	return i, j, nil
+	return i, j, k, nil
 }
 
 type transformer func([]byte) ([]byte, error)
@@ -898,7 +919,7 @@ func newJsonTransformer() transformer {
 	}
 }
 func transformAndSendBytes(ar *fsarchive, ta, tb time.Time, rc chan<- api.Reply, trans transformer) {
-	i, j, err := ar.getij(ta, tb)
+	i, j, offPos, err := ar.getFileIndexRange(ta, tb)
 
 	if err != nil {
 		rc <- api.Reply{nil, err}
@@ -917,6 +938,10 @@ func transformAndSendBytes(ar *fsarchive, ta, tb time.Time, rc chan<- api.Reply,
 		}
 		scanner := getScanner(file)
 		startt := time.Now()
+		// On the first file scanned, jump to the offset position
+		if k == i {
+			file.Seek(offPos, 0)
+		}
 		for scanner.Scan() {
 			data := scanner.Bytes()
 
@@ -1002,7 +1027,7 @@ func (fss *fsarstat) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitG
 		)
 		defer wg.Done()
 		ma := fss.fsarchive
-		i, j, err := ma.getij(ta, tb)
+		i, j, offPos, err := ma.getFileIndexRange(ta, tb)
 
 		if err != nil {
 			rc <- api.Reply{nil, err}
@@ -1022,6 +1047,7 @@ func (fss *fsarstat) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitG
 			startt := time.Now()
 			if k == i { //only on the first file to be examined
 				lastTime = ta //set it to the beginning of interval
+				file.Seek(offPos, 0)
 			}
 			for scanner.Scan() {
 				data := scanner.Bytes()

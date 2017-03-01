@@ -26,7 +26,7 @@ var (
 	output_suffix string
 	print_tes     bool
 	sample_rate   float64
-	new_basepath  string
+	new_dir       string
 )
 
 func GetScanner(file *os.File) (scanner *bufio.Scanner) {
@@ -52,7 +52,7 @@ func init() {
 	flag.Float64Var(&sample_rate, "r", DEFAULT_RATE, "")
 	flag.BoolVar(&print_tes, "print", false, "Do not create the index file, print the TES file to standard output instead")
 	flag.BoolVar(&print_tes, "p", false, "")
-	flag.StringVar(&new_basepath, "bp", "", "base path of the files referenced in the index. Must be the same across all entries.")
+	flag.StringVar(&new_dir, "dir", "", "rewrit dir of the files referenced in the index. Must be the same across all entries.")
 }
 
 func main() {
@@ -65,23 +65,51 @@ func main() {
 	}
 	if print_tes {
 		for _, tesName := range args {
-			fmt.Println("------ %s ------\n", tesName)
+			fmt.Printf("------ %s ------\n", tesName)
 			err := printTes(tesName)
 			if err != nil {
 				fmt.Printf("Print error: %v\n", err)
 			}
 			fmt.Printf("\n")
 		}
+	} else if new_dir != "" {
+		fmt.Printf("detecting base path in existing indexfiles\n")
+		for _, ifile := range args {
+			dirstr, err := detectDir(ifile)
+			if err != nil {
+				fmt.Printf("error:%s", err)
+				return
+			}
+			fmt.Printf("for %s detected dir %s\n", ifile, dirstr)
+		}
 	} else {
 		var wg sync.WaitGroup
 
 		for _, tesName := range args {
 			wg.Add(1)
-			go createIndexedTESFile(tesName, wg)
+			go createIndexedTESFile(tesName, &wg)
 		}
 		wg.Wait()
 	}
 
+}
+
+func detectDir(ifile string) (string, error) {
+	var detectedDir string
+	entries := bgp.TimeEntrySlice{}
+	err := (&entries).FromGobFile(ifile)
+	if err != nil {
+		return "", fmt.Errorf("Error opening index file: %s\n", ifile)
+	}
+	for _, ef := range entries {
+		entrydir := filepath.Dir(ef.Path)
+		if detectedDir == "" {
+			detectedDir = entrydir
+		} else if entrydir != detectedDir {
+			return "", fmt.Errorf("file contains different dirs in backend files. can't rewrite.")
+		}
+	}
+	return detectedDir, nil
 }
 
 func printTes(tesName string) error {
@@ -96,12 +124,12 @@ func printTes(tesName string) error {
 	return nil
 }
 
-func createIndexedTESFile(tesName string, wg sync.WaitGroup) {
+func createIndexedTESFile(tesName string, wg *sync.WaitGroup) {
 	defer wg.Done()
 	entries := bgp.TimeEntrySlice{}
 	err := (&entries).FromGobFile(tesName)
 	if err != nil {
-		fmt.Printf("Error opening TES: %s\n", tesName)
+		fmt.Printf("Error opening indexfile: %s\n", tesName)
 		return
 	}
 	output_name := tesName + output_suffix
@@ -180,7 +208,7 @@ func Generate_Index(scanner *bufio.Scanner, fsize int64, sample_rate float64, tr
 }
 
 func usage() {
-	fmt.Println("indextool: writes an indexed version of a TimeEntrySlice into a specified file,\nprints an index file, or rewrites the basepath of TimeEntrySlices.")
+	fmt.Println("indextool: writes an indexed version of a TimeEntrySlice into a specified file,\nprints an index file, or rewrites the dir of TimeEntrySlices.")
 	fmt.Println("usage: indextool [flags] original-tes-file")
 	fmt.Println("See indextool -h for a list of flags.")
 }

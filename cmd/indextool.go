@@ -105,6 +105,10 @@ func createIndexedTESFile(tesName string, wg sync.WaitGroup) {
 		return
 	}
 	output_name := tesName + output_suffix
+	if _, err := os.Stat(output_name); !os.IsNotExist(err) {
+		fmt.Printf("Error: destination file:%s already exists\n", output_name)
+		return
+	}
 	for enct, _ := range entries {
 		entryfile, err := os.Open(entries[enct].Path)
 		if err != nil {

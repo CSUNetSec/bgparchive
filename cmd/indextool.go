@@ -23,9 +23,10 @@ const (
 )
 
 var (
-	output_name string
-	print_tes   bool
-	sample_rate float64
+	output_suffix string
+	print_tes     bool
+	sample_rate   float64
+	new_basepath  string
 )
 
 func GetScanner(file *os.File) (scanner *bufio.Scanner) {
@@ -45,12 +46,13 @@ func GetScanner(file *os.File) (scanner *bufio.Scanner) {
 }
 
 func init() {
-	flag.StringVar(&output_name, "outfile", "", "name of the generated index file")
-	flag.StringVar(&output_name, "o", "", "")
+	flag.StringVar(&output_suffix, "outsuffix", "", "suffix of the generated index file")
+	flag.StringVar(&output_suffix, "o", "", "")
 	flag.Float64Var(&sample_rate, "rate", DEFAULT_RATE, "sample rate used")
 	flag.Float64Var(&sample_rate, "r", DEFAULT_RATE, "")
 	flag.BoolVar(&print_tes, "print", false, "Do not create the index file, print the TES file to standard output instead")
 	flag.BoolVar(&print_tes, "p", false, "")
+	flag.StringVar(&new_basepath, "bp", "", "base path of the files referenced in the index. Must be the same across all entries.")
 }
 
 func main() {
@@ -75,7 +77,7 @@ func main() {
 
 		for _, tesName := range args {
 			wg.Add(1)
-			go indexTESFile(tesName, wg)
+			go createIndexedTESFile(tesName, wg)
 		}
 		wg.Wait()
 	}
@@ -94,7 +96,7 @@ func printTes(tesName string) error {
 	return nil
 }
 
-func indexTESFile(tesName string, wg sync.WaitGroup) {
+func createIndexedTESFile(tesName string, wg sync.WaitGroup) {
 	defer wg.Done()
 	entries := bgp.TimeEntrySlice{}
 	err := (&entries).FromGobFile(tesName)
@@ -102,7 +104,7 @@ func indexTESFile(tesName string, wg sync.WaitGroup) {
 		fmt.Printf("Error opening TES: %s\n", tesName)
 		return
 	}
-	output_name = tesName + "-index"
+	output_name := tesName + output_suffix
 	for enct, _ := range entries {
 		entryfile, err := os.Open(entries[enct].Path)
 		if err != nil {
@@ -174,7 +176,7 @@ func Generate_Index(scanner *bufio.Scanner, fsize int64, sample_rate float64, tr
 }
 
 func usage() {
-	fmt.Println("indextool: writes an indexed version of a TimeEntrySlice into a specified file.")
+	fmt.Println("indextool: writes an indexed version of a TimeEntrySlice into a specified file,\nprints an index file, or rewrites the basepath of TimeEntrySlices.")
 	fmt.Println("usage: indextool [flags] original-tes-file")
 	fmt.Println("See indextool -h for a list of flags.")
 }

@@ -14,6 +14,7 @@ import (
 	pbmrt "github.com/CSUNetSec/protoparse/protocol/mrt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -52,16 +53,20 @@ func init() {
 	flag.Float64Var(&sample_rate, "r", DEFAULT_RATE, "")
 	flag.BoolVar(&print_tes, "print", false, "Do not create the index file, print the TES file to standard output instead")
 	flag.BoolVar(&print_tes, "p", false, "")
-	flag.StringVar(&new_dir, "dir", "", "rewrit dir of the files referenced in the index. Must be the same across all entries.")
+	flag.StringVar(&new_dir, "dir", "", "rewrit dir of the files referenced in the index. Must be the same across all entries. format is s:olddir:newdir")
 }
 
 func main() {
 	flag.Parse()
 	args := flag.Args()
+	var sf []string
 
 	if len(args) < 1 {
 		usage()
 		return
+	}
+	ff := func(r rune) bool {
+		return r == ':'
 	}
 	if print_tes {
 		for _, tesName := range args {
@@ -74,13 +79,17 @@ func main() {
 		}
 	} else if new_dir != "" {
 		fmt.Printf("detecting base path in existing indexfiles\n")
+		if sf = strings.FieldsFunc(new_dir, ff); new_dir[0] != 's' && len(sf) != 3 {
+			fmt.Printf("error: malformed sed rewrite string")
+			return
+		}
 		for _, ifile := range args {
-			dirstr, err := detectDir(ifile)
+			err := rewriteDir(ifile, sf[1], sf[2])
 			if err != nil {
 				fmt.Printf("error:%s", err)
 				return
 			}
-			fmt.Printf("for %s detected dir %s\n", ifile, dirstr)
+			fmt.Printf("rewrote %s to %s in file %s\n", sf[1], sf[2], ifile+"."+output_suffix)
 		}
 	} else {
 		var wg sync.WaitGroup
@@ -94,22 +103,40 @@ func main() {
 
 }
 
-func detectDir(ifile string) (string, error) {
-	var detectedDir string
+func rewriteDir(ifile, from, to string) error {
+	var (
+		detectedDir, output_name string
+	)
 	entries := bgp.TimeEntrySlice{}
 	err := (&entries).FromGobFile(ifile)
 	if err != nil {
-		return "", fmt.Errorf("Error opening index file: %s\n", ifile)
+		return fmt.Errorf("Error opening index file: %s\n", ifile)
+	}
+	if output_suffix != "" {
+		output_name = ifile + "." + output_suffix
+	} else {
+		output_name = ifile + ".newdir"
 	}
 	for _, ef := range entries {
 		entrydir := filepath.Dir(ef.Path)
 		if detectedDir == "" {
 			detectedDir = entrydir
 		} else if entrydir != detectedDir {
-			return "", fmt.Errorf("file contains different dirs in backend files. can't rewrite.")
+			return fmt.Errorf("file contains different dirs in backend files. can't rewrite.\n")
 		}
 	}
-	return detectedDir, nil
+	if detectedDir != from {
+		return fmt.Errorf("from argument string is not the same as detected dir:%s\n", detectedDir)
+	}
+	for i, ef := range entries {
+		entries[i].Path = to + filepath.Base(ef.Path)
+	}
+	err = entries.ToGobFile(output_name)
+	if err != nil {
+		fmt.Printf("Error regobing TES: %s\n", output_name)
+	}
+
+	return nil
 }
 
 func printTes(tesName string) error {
@@ -132,7 +159,7 @@ func createIndexedTESFile(tesName string, wg *sync.WaitGroup) {
 		fmt.Printf("Error opening indexfile: %s\n", tesName)
 		return
 	}
-	output_name := tesName + output_suffix
+	output_name := tesName + "." + output_suffix
 	if _, err := os.Stat(output_name); !os.IsNotExist(err) {
 		fmt.Printf("Error: destination file:%s already exists\n", output_name)
 		return

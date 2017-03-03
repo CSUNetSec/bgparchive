@@ -1,0 +1,16 @@
+#archive todo 
+
+if someone starts working on something, please annotate this file with date
+and branch url for feature.
+
+##groupcache support
+1. add config file hooks for other participants in the cache
+2. create a shared context object
+3. make sure nodes have commonly shared storage that they can serialize indexes
+4. rewrite the scanning logic to check the shared context for last time scanned and
+   mark the scan run if any
+5. rewrite queries to check the cache first
+
+##context support
+1. support context as per go1.7 in the fired goroutines
+2. detect HTTP cancellation to kill any working goroutines

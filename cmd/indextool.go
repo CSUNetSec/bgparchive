@@ -59,7 +59,10 @@ func init() {
 func main() {
 	flag.Parse()
 	args := flag.Args()
-	var sf []string
+	var (
+		sf  []string
+		suf string
+	)
 
 	if len(args) < 1 {
 		usage()
@@ -89,7 +92,12 @@ func main() {
 				fmt.Printf("error:%s", err)
 				return
 			}
-			fmt.Printf("rewrote %s to %s in file %s\n", sf[1], sf[2], ifile+"."+output_suffix)
+			if output_suffix == "" {
+				suf = "newdir"
+			} else {
+				suf = output_suffix
+			}
+			fmt.Printf("rewrote %s to %s in file %s\n", sf[1], sf[2], ifile+"."+suf)
 		}
 	} else {
 		var wg sync.WaitGroup
@@ -105,7 +113,7 @@ func main() {
 
 func rewriteDir(ifile, from, to string) error {
 	var (
-		detectedDir, output_name string
+		output_name string
 	)
 	entries := bgp.TimeEntrySlice{}
 	err := (&entries).FromGobFile(ifile)
@@ -117,19 +125,11 @@ func rewriteDir(ifile, from, to string) error {
 	} else {
 		output_name = ifile + ".newdir"
 	}
-	for _, ef := range entries {
-		entrydir := filepath.Dir(ef.Path)
-		if detectedDir == "" {
-			detectedDir = entrydir
-		} else if entrydir != detectedDir {
-			return fmt.Errorf("file contains different dirs in backend files. can't rewrite.\n")
-		}
-	}
-	if detectedDir != from {
-		return fmt.Errorf("from argument string is not the same as detected dir:%s\n", detectedDir)
-	}
 	for i, ef := range entries {
-		entries[i].Path = to + filepath.Base(ef.Path)
+		if !strings.Contains(ef.Path, from) {
+			return fmt.Errorf("from argument string:%s is not the contained in the detected dir:%s\n", from, ef.Path)
+		}
+		entries[i].Path = strings.Replace(ef.Path, from, to, 1) // we run it as s/a/b not s/a/b/g
 	}
 	err = entries.ToGobFile(output_name)
 	if err != nil {

@@ -154,7 +154,7 @@ func createIndexedTESFile(tesName string, wg *sync.WaitGroup) {
 			fmt.Printf("Error opening ArchEntryFile: %s\n", entries[enct].Path)
 			return
 		}
-		m := util.Generate_Index(entryfile, sample_rate, util.GetTimestampFromMRT)
+		m := util.GenerateIndexes(entryfile, sample_rate, util.GetTimestampFromMRT)
 		entries[enct].Offsets = make([]bgp.EntryOffset, len(m))
 		for ct, offset := range m {
 			if offset != nil {

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"compress/bzip2"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	ppmrt "github.com/CSUNetSec/protoparse/protocol/mrt"
 	"log"
@@ -50,7 +49,7 @@ func GetScanner(file *os.File) (scanner *bufio.Scanner) {
 // Generates indexes based on the file size and sample rate
 // The scanner must be initialized and Split to parse messages
 // before given to this function
-func Generate_Index(file *os.File, sample_rate float64, translate func([]byte) (interface{}, error)) []*ItemOffset {
+func GenerateIndexes(file *os.File, sample_rate float64, translate func([]byte) (interface{}, error)) []*ItemOffset {
 	var (
 		compratio int
 	)
@@ -76,7 +75,6 @@ func Generate_Index(file *os.File, sample_rate float64, translate func([]byte) (
 	var actual_pos int64 = 0
 	for scanner.Scan() {
 		data := scanner.Bytes()
-		actual_pos += int64(len(data))
 		if float64(actual_pos) >= float64(index_ct)*sample_dist {
 			td, err := translate(data)
 			if err == nil {
@@ -86,6 +84,7 @@ func Generate_Index(file *os.File, sample_rate float64, translate func([]byte) (
 				log.Printf("Encounter error %s on file %s", err, fname)
 			}
 		}
+		actual_pos += int64(len(data))
 	}
 	if scerr := scanner.Err(); scerr != nil {
 		if scerr == bufio.ErrTooLong { //could be a RIB
@@ -121,53 +120,15 @@ func GetTimestampFromMRT(data []byte) (interface{}, error) {
 func GetFirstDate(fname string) (t time.Time, err error) {
 	file, err := os.Open(fname)
 	if err != nil {
-		log.Println("getFirstDate failed opening file: ", fname, " ", err)
 		return
 	}
 	defer file.Close()
-	scanner := GetScanner(file)
-	scanner.Scan()
-	err = scanner.Err()
-	if err != nil {
-		if err == bufio.ErrTooLong { //could be a RIB
-			var (
-				nb      int
-				errread error
-			)
-			hdbuf := make([]byte, ppmrt.MRT_HEADER_LEN)
-			nb, errread = file.Read(hdbuf)
-			if nb != ppmrt.MRT_HEADER_LEN || errread != nil {
-				err = fmt.Errorf("RIB file read error. less bytes or %s", errread)
-				return
-			}
-			hdrbuf := ppmrt.NewMrtHdrBuf(hdbuf)
-			_, err = hdrbuf.Parse()
-			if err != nil {
-				log.Printf("getFirstDate error in creating MRT header:%s", err)
-				return
-			}
-			hdr := hdrbuf.GetHeader()
-			t = time.Unix(int64(hdr.Timestamp), 0)
-			//log.Printf("getFirstDate got header with time:%v", t)
-			return
-		}
-		log.Printf("getFirstDate scanner error:%s", err)
+	ind := GenerateIndexes(file, 0.1, GetTimestampFromMRT)
+	if len(ind) == 0 {
+		err = fmt.Errorf("no indexes could be generated for file:%s", fname)
 		return
 	}
-	data := scanner.Bytes()
-	if len(data) < ppmrt.MRT_HEADER_LEN {
-		log.Printf("getFirstDate on %s MRT scanner returned less bytes (%d) than the minimum header", fname, len(data))
-		return time.Now(), errors.New(fmt.Sprintf("too few bytes read from mrtfile:%s", fname))
-	}
-
-	hdrbuf := ppmrt.NewMrtHdrBuf(data)
-	_, err = hdrbuf.Parse()
-	if err != nil {
-		log.Printf("getFirstDate error in creating MRT header:%s", err)
-		return
-	}
-	hdr := hdrbuf.GetHeader()
-	t = time.Unix(int64(hdr.Timestamp), 0)
+	t = ind[0].Value.(time.Time)
 	//log.Printf("getFirstDate got header with time:%v", t)
 	return
 }

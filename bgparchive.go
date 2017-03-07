@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/CSUNetSec/bgparchive/api"
+	util "github.com/CSUNetSec/bgparchive/util"
 	pb "github.com/CSUNetSec/netsec-protobufs/protocol/bgp"
 	pp "github.com/CSUNetSec/protoparse"
 	ppmrt "github.com/CSUNetSec/protoparse/protocol/mrt"
@@ -764,60 +765,6 @@ func getScanner(file *os.File) (scanner *bufio.Scanner) {
 	return
 }
 
-func getFirstDate(fname string) (t time.Time, err error) {
-	file, err := os.Open(fname)
-	if err != nil {
-		log.Println("getFirstDate failed opening file: ", fname, " ", err)
-		return
-	}
-	defer file.Close()
-	scanner := getScanner(file)
-	scanner.Scan()
-	err = scanner.Err()
-	if err != nil {
-		if err == bufio.ErrTooLong { //could be a RIB
-			var (
-				nb      int
-				errread error
-			)
-			hdbuf := make([]byte, ppmrt.MRT_HEADER_LEN)
-			nb, errread = file.Read(hdbuf)
-			if nb != ppmrt.MRT_HEADER_LEN || errread != nil {
-				err = fmt.Errorf("RIB file read error. less bytes or %s", errread)
-				return
-			}
-			hdrbuf := ppmrt.NewMrtHdrBuf(hdbuf)
-			_, err = hdrbuf.Parse()
-			if err != nil {
-				log.Printf("getFirstDate error in creating MRT header:%s", err)
-				return
-			}
-			hdr := hdrbuf.GetHeader()
-			t = time.Unix(int64(hdr.Timestamp), 0)
-			//log.Printf("getFirstDate got header with time:%v", t)
-			return
-		}
-		log.Printf("getFirstDate scanner error:%s", err)
-		return
-	}
-	data := scanner.Bytes()
-	if len(data) < ppmrt.MRT_HEADER_LEN {
-		log.Printf("getFirstDate on %s MRT scanner returned less bytes (%d) than the minimum header", fname, len(data))
-		return time.Now(), errors.New(fmt.Sprintf("too few bytes read from mrtfile:%s", fname))
-	}
-
-	hdrbuf := ppmrt.NewMrtHdrBuf(data)
-	_, err = hdrbuf.Parse()
-	if err != nil {
-		log.Printf("getFirstDate error in creating MRT header:%s", err)
-		return
-	}
-	hdr := hdrbuf.GetHeader()
-	t = time.Unix(int64(hdr.Timestamp), 0)
-	//log.Printf("getFirstDate got header with time:%v", t)
-	return
-}
-
 func (ma *fsarchive) getFileIndexRange(ta, tb time.Time) (int, int, int64, error) {
 	ef := *ma.entryfiles
 	if len(ef) == 0 {
@@ -1202,10 +1149,10 @@ func (fsa *mrtarchive) revisit(pathname string, f os.FileInfo, err error) error 
 		return nil
 	}
 	if f.Mode().IsRegular() {
-		time, errtime := getFirstDate(pathname)
+		time, errtime := util.GetFirstDate(pathname)
 		if errtime != nil {
 			if fsa.debug {
-				log.Print("getFirstDate failed on file: ", fname, " that should be in fooHHMM format with error: ", errtime)
+				log.Print("GetFirstDate failed on file: ", fname, " that should be in fooHHMM format with error: ", errtime)
 			}
 			return nil
 		}
@@ -1229,7 +1176,7 @@ func (fsa *mrtarchive) visit(pathname string, f os.FileInfo, err error) error {
 		return nil
 	}
 	if f.Mode().IsRegular() {
-		time, errtime := getFirstDate(pathname)
+		time, errtime := util.GetFirstDate(pathname)
 		if errtime != nil {
 			if fsa.debug {
 				log.Print("time.Parse() failed on file: ", fname, " that should be in fooHHMM format with error: ", errtime)

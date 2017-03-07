@@ -69,13 +69,13 @@ func GenerateIndexes(file *os.File, sample_rate float64, translate func([]byte) 
 		return nil
 	}
 	fsize := fstat.Size()
-	indices := []*ItemOffset{}                                       //create the slice dynamically to only populate offsets that exist.
-	sample_dist := sample_rate * float64(fsize) * float64(compratio) // this is an estimate on how
+	indices := []*ItemOffset{}                                            //create the slice dynamically to only populate offsets that exist.
+	sample_dist := int(sample_rate * float64(fsize) * float64(compratio)) // this is an estimate on how
 	index_ct := 0
 	var actual_pos int64 = 0
 	for scanner.Scan() {
 		data := scanner.Bytes()
-		if float64(actual_pos) >= float64(index_ct)*sample_dist {
+		if actual_pos >= int64(index_ct*sample_dist) {
 			td, err := translate(data)
 			if err == nil {
 				indices = append(indices, NewItemOffset(td, actual_pos))

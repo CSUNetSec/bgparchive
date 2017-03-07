@@ -164,6 +164,14 @@ type EntryOffset struct {
 	Pos  int64
 }
 
+func ItemOffsToEntryOffs(a []util.ItemOffset) []EntryOffset {
+	ret := make([]EntryOffset, len(a))
+	for ct, offset := range a {
+		ret[ct] = EntryOffset{offset.Value.(time.Time), offset.Off}
+	}
+	return ret
+}
+
 //implements Sort interface by time.Time
 type ArchEntryFile struct {
 	Path    string
@@ -1149,16 +1157,16 @@ func (fsa *mrtarchive) revisit(pathname string, f os.FileInfo, err error) error 
 		return nil
 	}
 	if f.Mode().IsRegular() {
-		time, errtime := util.GetFirstDate(pathname)
+		time, offs, errtime := util.GetFirstDateAndOffsets(pathname)
 		if errtime != nil {
 			if fsa.debug {
-				log.Print("GetFirstDate failed on file: ", fname, " that should be in fooHHMM format with error: ", errtime)
+				log.Print("GetFirstDateAndOffsets failed on file: ", fname, " that should be in fooHHMM format with error: ", errtime)
 			}
 			return nil
 		}
 		if time.After(ld) { // only add files that are later than current lastdate.
 			log.Printf("adding file:%s with date:%v to the archive\n", pathname, time)
-			fsa.tempentryfiles = append(fsa.tempentryfiles, ArchEntryFile{Path: pathname, Sdate: time, Sz: f.Size()})
+			fsa.tempentryfiles = append(fsa.tempentryfiles, ArchEntryFile{Path: pathname, Sdate: time, Sz: f.Size(), Offsets: ItemOffsToEntryOffs(offs)})
 		} else {
 			//log.Printf("on: %s time:%v not later than last archived time:%v", fname, time, ld)
 		}
@@ -1176,14 +1184,14 @@ func (fsa *mrtarchive) visit(pathname string, f os.FileInfo, err error) error {
 		return nil
 	}
 	if f.Mode().IsRegular() {
-		time, errtime := util.GetFirstDate(pathname)
+		time, offs, errtime := util.GetFirstDateAndOffsets(pathname)
 		if errtime != nil {
 			if fsa.debug {
 				log.Print("time.Parse() failed on file: ", fname, " that should be in fooHHMM format with error: ", errtime)
 			}
 			return nil
 		}
-		fsa.tempentryfiles = append(fsa.tempentryfiles, ArchEntryFile{Path: pathname, Sdate: time, Sz: f.Size()})
+		fsa.tempentryfiles = append(fsa.tempentryfiles, ArchEntryFile{Path: pathname, Sdate: time, Sz: f.Size(), Offsets: ItemOffsToEntryOffs(offs)})
 	}
 	return nil
 }

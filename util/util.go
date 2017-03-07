@@ -22,8 +22,8 @@ type ItemOffset struct {
 	Off   int64
 }
 
-func NewItemOffset(val interface{}, pos int64) *ItemOffset {
-	return &ItemOffset{val, pos}
+func NewItemOffset(val interface{}, pos int64) ItemOffset {
+	return ItemOffset{val, pos}
 }
 
 //returns an underlying bufio.Scanner if file is bz2 or plan
@@ -49,7 +49,7 @@ func GetScanner(file *os.File) (scanner *bufio.Scanner) {
 // Generates indexes based on the file size and sample rate
 // The scanner must be initialized and Split to parse messages
 // before given to this function
-func GenerateIndexes(file *os.File, sample_rate float64, translate func([]byte) (interface{}, error)) []*ItemOffset {
+func GenerateIndexes(file *os.File, sample_rate float64, translate func([]byte) (interface{}, error)) []ItemOffset {
 	var (
 		compratio int
 	)
@@ -69,7 +69,7 @@ func GenerateIndexes(file *os.File, sample_rate float64, translate func([]byte) 
 		return nil
 	}
 	fsize := fstat.Size()
-	indices := []*ItemOffset{}                                            //create the slice dynamically to only populate offsets that exist.
+	indices := []ItemOffset{}                                             //create the slice dynamically to only populate offsets that exist.
 	sample_dist := int(sample_rate * float64(fsize) * float64(compratio)) // this is an estimate on how
 	index_ct := 0
 	var actual_pos int64 = 0
@@ -117,18 +117,18 @@ func GetTimestampFromMRT(data []byte) (interface{}, error) {
 	return time.Unix(int64(unix_t), 0), nil
 }
 
-func GetFirstDate(fname string) (t time.Time, err error) {
+func GetFirstDateAndOffsets(fname string) (t time.Time, offs []ItemOffset, err error) {
 	file, err := os.Open(fname)
 	if err != nil {
 		return
 	}
 	defer file.Close()
-	ind := GenerateIndexes(file, 0.1, GetTimestampFromMRT)
-	if len(ind) == 0 {
+	offs = GenerateIndexes(file, 0.1, GetTimestampFromMRT)
+	if len(offs) == 0 {
 		err = fmt.Errorf("no indexes could be generated for file:%s", fname)
 		return
 	}
-	t = ind[0].Value.(time.Time)
+	t = offs[0].Value.(time.Time)
 	//log.Printf("getFirstDate got header with time:%v", t)
 	return
 }

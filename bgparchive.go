@@ -186,7 +186,7 @@ type ArchEntryFile struct {
 }
 
 func (a ArchEntryFile) String() string {
-	return fmt.Sprintf("[path:%s date:%v size:%d offsets:%v]", a.Path, a.Sdate, a.Sz, a.Offsets)
+	return fmt.Sprintf("[path:%s date:%v size:%d offsets:%v]", a.Path, a.Sdate.UTC(), a.Sz, a.Offsets)
 }
 
 type TimeEntrySlice []ArchEntryFile
@@ -266,7 +266,7 @@ func (f *fsarchive) getContextChans() (chan contCmd, chan contCli) {
 func (f *fsarchive) GetDateRangeString() string {
 	if len(*(f.entryfiles)) > 0 {
 		files := *(f.entryfiles)
-		dates := fmt.Sprintf("%s - %s\n", files[0].Sdate, files[len(files)-1].Sdate)
+		dates := fmt.Sprintf("%s - %s\n", files[0].Sdate.UTC(), files[len(files)-1].Sdate.UTC())
 		return dates
 	}
 	return "archive is empty\n"
@@ -592,7 +592,7 @@ func (fsc *fsarconf) Get(ctx context.Context, values url.Values) (api.HdrReply, 
 		if _, ok := values["range"]; ok {
 			if len(*arfiles) > 0 {
 				f := *arfiles
-				dates := fmt.Sprintf("%s - %s\n", f[0].Sdate, f[len(f)-1].Sdate)
+				dates := fmt.Sprintf("%s - %s\n", f[0].Sdate.UTC(), f[len(f)-1].Sdate.UTC())
 				retc <- api.Reply{Data: []byte(dates), Err: nil}
 				return
 			}
@@ -1299,7 +1299,7 @@ func isYearMonthDir(fname string) (res bool, yr int, mon int) {
 func (fsa *fsarchive) printEntries() {
 	log.Printf("dumping entries")
 	for _, ef := range *fsa.entryfiles {
-		fmt.Printf("%s %s\n", ef.Path, ef.Sdate)
+		fmt.Printf("%s %s\n", ef.Path, ef.Sdate.UTC())
 	}
 }
 

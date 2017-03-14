@@ -98,24 +98,20 @@ func (api *API) requestHandlerFunc(resource Resource) http.HandlerFunc {
 		rw.WriteHeader(code.Code)
 		if datac != nil { // we got a proper channel to get datafrom
 			//go func(dc <-chan Reply) { // fire a goroutine that will end upon the chan getting closed
-			reqOpen := true
-			for reqOpen {
+			for r := range datac {
 				select {
-				case r, reqOpen := <-datac:
-					if reqOpen {
-						if r.Err == nil {
-							rw.Write(r.Data)
-						} else {
-							log.Printf("Error in received from data channel:%s\n", r.Err)
-							rw.Write([]byte(fmt.Sprintf("%s\n", r.Err)))
-						}
-					}
 				case <-rw.(http.CloseNotifier).CloseNotify():
+					//The functions listening on the context channel must close the data channel.
 					cf()
-					reqOpen = false
+				default:
+					if r.Err == nil {
+						rw.Write(r.Data)
+					} else {
+						log.Printf("Error in received from data channel:%s\n", r.Err)
+						rw.Write([]byte(fmt.Sprintf("%s\n", r.Err)))
+					}
 				}
 			}
-			//}(datac)
 		}
 	}
 }

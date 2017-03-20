@@ -1157,6 +1157,10 @@ func (fsa *mrtarchive) revisit(pathname string, f os.FileInfo, err error) error 
 		return nil
 	}
 	if f.Mode().IsRegular() {
+		//skip temporary files being rsynced that start with .
+		if fstr := path.Base(pathname); len(fstr) > 0 && fstr[0] == '.' {
+			return nil
+		}
 		time, offs, errtime := util.GetFirstDateAndOffsets(pathname)
 		if errtime != nil {
 			if fsa.debug {
@@ -1184,6 +1188,10 @@ func (fsa *mrtarchive) visit(pathname string, f os.FileInfo, err error) error {
 		return nil
 	}
 	if f.Mode().IsRegular() {
+		//skip temporary files being rsynced that start with .
+		if fstr := path.Base(pathname); len(fstr) > 0 && fstr[0] == '.' {
+			return nil
+		}
 		time, offs, errtime := util.GetFirstDateAndOffsets(pathname)
 		if errtime != nil {
 			if fsa.debug {

@@ -104,29 +104,28 @@ func main() {
 		api.AddResource(fsc, fmt.Sprintf("/archive/mrt/%s%s/conf", v.Collector, v.Path))
 		api.AddResource(statar, fmt.Sprintf("/archive/mrt/%s%s/stats", v.Collector, v.Path))
 		mrtreqc := ars[i].Serve(servewg, allscanwg)
-		errg := ars[i].Load(fmt.Sprintf("%s/%s-%s", flag_savepath, v.Desc, v.Collector))
+		fstr := fmt.Sprintf("%s/%s-%s", flag_savepath, v.Desc, v.Collector)
+		errg := ars[i].Load(fstr)
 		if errg != nil {
-			log.Printf("failed to find serialized file. Scanning")
+			log.Printf("failed to find serialized file %s. error:%s. Scanning", fstr, errg)
 			mrtreqc <- "SCAN"
 			//log.Printf("Entryfiles are:%s", ars[i].tempentryfiles)
 			allscanwg.Wait()
-			errg = ars[i].Save(fmt.Sprintf("%s/%s-%s", flag_savepath, v.Desc, v.Collector))
+			errg = ars[i].Save(fstr)
 			if errg != nil {
 				log.Println(errg)
 			} else {
-				log.Printf("created serialized file for archive:%v", v)
+				log.Printf("created serialized file %s for archive:%v", fstr, v)
 			}
 		} else {
-			//log.Printf("Found serialized file for archive:%s. entryfiles:%s", v, ars[i].entryfiles)
-			log.Printf("Found serialized file for archive:%v.", v)
-			ars[i].SetEntryFilesToTemp()
+			log.Printf("Found serialized file %s for archive:%v.", fstr, v)
 		}
 		hmsg.AddArchive(fsc)
 	}
 	allscanwg.Wait()
 	//the global help message
 	api.AddResource(hmsg, "/archive/help")
-	api.Start(flag_port)
+	api.Start(flag_port, flag_debug)
 	for _, v := range ars {
 		rc := v.GetReqChan()
 		close(rc)

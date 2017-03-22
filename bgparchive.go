@@ -1,9 +1,7 @@
 package bgparchive
 
 import (
-	"bufio"
 	"bytes"
-	"compress/bzip2"
 	"encoding/binary"
 	"encoding/gob"
 	"encoding/hex"
@@ -109,15 +107,15 @@ type HelpMsg struct {
 
 func (h *HelpMsg) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 	retc := make(chan api.Reply)
-	go func() {
-		defer close(retc)
-		retc <- api.Reply{Data: []byte(fmt.Sprintf("%s\n", HELPSTR)), Err: nil}
+	go func(rch chan api.Reply) {
+		defer close(rch)
+		rch <- api.Reply{Data: []byte(fmt.Sprintf("%s\n", HELPSTR)), Err: nil}
 		for i := range h.ars {
 			arstr := fmt.Sprintf("\t%-8s archive: %-25s\trange:%s", riborupdatestr(h.ars[i].descriminator), h.ars[i].GetCollectorString(), h.ars[i].GetDateRangeString())
-			retc <- api.Reply{Data: []byte(arstr), Err: nil}
+			rch <- api.Reply{Data: []byte(arstr), Err: nil}
 		}
 		return
-	}()
+	}(retc)
 	return api.HdrReply{Code: 200}, retc
 
 }
@@ -194,31 +192,6 @@ func (a TimeEntrySlice) String() string {
 	return strings.Join(ret, " ")
 }
 
-func (t *TimeEntrySlice) ToGobFile(fname string) (err error) {
-	m := new(bytes.Buffer)
-	enc := gob.NewEncoder(m)
-	//fmt.Printf("before encoding it is :%s", t)
-	err = enc.Encode(t)
-	if err != nil {
-		return
-	}
-
-	err = ioutil.WriteFile(fname, m.Bytes(), 0600)
-	return
-}
-
-func (t *TimeEntrySlice) FromGobFile(fname string) (err error) {
-	n, err := ioutil.ReadFile(fname)
-	if err != nil {
-		return
-	}
-	p := bytes.NewBuffer(n)
-	dec := gob.NewDecoder(p)
-	err = dec.Decode(t)
-	//fmt.Printf("after decoding it is :%s", t)
-	return
-}
-
 func (p TimeEntrySlice) Len() int {
 	return len(p)
 }
@@ -233,7 +206,7 @@ func (p TimeEntrySlice) Swap(i, j int) {
 
 type fsarchive struct {
 	rootpathstr    string
-	entryfiles     *TimeEntrySlice
+	entryfiles     TimeEntrySlice
 	tempentryfiles TimeEntrySlice
 	reqchan        chan string
 	scanning       bool
@@ -244,7 +217,7 @@ type fsarchive struct {
 	refreshmin     int
 	//this context will allow us to communicate with the continuous pull client goroutine
 	contctx *contCtx
-	//collctor name that is used in the url as well as the saved index files
+	//collector name that is used in the url as well as the saved index files
 	collectorstr string
 	debug        bool
 	savepath     string
@@ -254,20 +227,43 @@ type fsarchive struct {
 	api.DeleteNotAllowed
 }
 
-func (f *fsarchive) getContextChans() (chan contCmd, chan contCli) {
+func (f fsarchive) getContextChans() (chan contCmd, chan contCli) {
 	return f.contctx.reqch, f.contctx.repch
 }
 
-func (f *fsarchive) GetDateRangeString() string {
-	if len(*(f.entryfiles)) > 0 {
-		files := *(f.entryfiles)
+func (f fsarchive) GetDateRangeString() string {
+	if len(f.entryfiles) > 0 {
+		files := f.entryfiles
 		dates := fmt.Sprintf("%s - %s\n", files[0].Sdate, files[len(files)-1].Sdate)
 		return dates
 	}
 	return "archive is empty\n"
 }
 
-func (f *fsarchive) GetCollectorString() string {
+func (f *fsarchive) ToGobFile(fname string) (err error) {
+	buf := new(bytes.Buffer)
+	enc := gob.NewEncoder(buf)
+	err = enc.Encode(f.entryfiles)
+	if err != nil {
+		return
+	}
+
+	err = ioutil.WriteFile(fname, buf.Bytes(), 0600)
+	return
+}
+
+func (f *fsarchive) FromGobFile(fname string) (err error) {
+	n, err := ioutil.ReadFile(fname)
+	if err != nil {
+		return
+	}
+	p := bytes.NewBuffer(n)
+	dec := gob.NewDecoder(p)
+	err = dec.Decode(&(f.entryfiles))
+	return
+}
+
+func (f fsarchive) GetCollectorString() string {
 	return f.collectorstr
 }
 
@@ -371,17 +367,17 @@ func (ctx *contCtx) Del(a *contCli) error {
 	return nil
 }
 
-func (ctx *contCtx) ExistsId(a string) bool {
+func (ctx contCtx) ExistsId(a string) bool {
 	_, ok := ctx.contuuid[a]
 	return ok
 }
 
-func (ctx *contCtx) ExistsIP(a string) bool {
+func (ctx contCtx) ExistsIP(a string) bool {
 	_, ok := ctx.contclis[a]
 	return ok
 }
 
-func (ctx *contCtx) GetIDsfromIP(a string) (ret []string) {
+func (ctx contCtx) GetIDsfromIP(a string) (ret []string) {
 	cclis, ok := ctx.contclis[a]
 	if ok {
 		for i := range cclis {
@@ -421,7 +417,7 @@ func (ctx *contCtx) UpdateCli(a *contCli) {
 	ctx.PrintClis()
 }
 
-func (ctx *contCtx) PrintClis() {
+func (ctx contCtx) PrintClis() {
 	log.Printf("PRINTING")
 	for k, v := range ctx.contclis {
 		log.Printf("by IP key:%v val:%v", k, v)
@@ -447,7 +443,7 @@ func setTimer(a *contCli, expirech chan *contCli) {
 }
 
 //serve just fires the goroutine that handles the continuous pulling
-func (ctx *contCtx) Serve() {
+func (ctx contCtx) Serve() {
 	//this is the goroutine that is the main event loop for the continuous pulling engine
 	go func() {
 		expirech := make(chan *contCli) //this is the aggregate channel that the timer goroutines will write their expiration
@@ -524,28 +520,40 @@ func NewJsonArchive(a *fsarchive) *jsonarchive {
 
 type MrtArchives []*mrtarchive
 
-func (m *mrtarchive) GetFsArchive() *fsarchive {
+func (m mrtarchive) GetFsArchive() *fsarchive {
 	return m.fsarchive
 }
 
-func (m *mrtarchive) GetScanWaitGroup() *sync.WaitGroup {
+func (m mrtarchive) GetScanWaitGroup() *sync.WaitGroup {
 	return m.scanwg
 }
 
 func (m *mrtarchive) Save(a string) error {
-	return m.tempentryfiles.ToGobFile(a)
+	return m.ToGobFile(a)
 }
 
 func (m *mrtarchive) Load(a string) error {
-	return m.tempentryfiles.FromGobFile(a)
+	return m.FromGobFile(a)
 }
 
-func (m *mrtarchive) GetReqChan() chan string {
+func (m mrtarchive) GetReqChan() chan string {
 	return m.reqchan
 }
 
-func (m *mrtarchive) SetEntryFilesToTemp() {
-	m.entryfiles = &m.tempentryfiles
+func (m *mrtarchive) StoreTempEntryFiles() {
+	m.entryfiles = make(TimeEntrySlice, len(m.tempentryfiles))
+	copy(m.entryfiles, m.tempentryfiles)
+}
+
+func (m *mrtarchive) mergeTempEntryWithEntryFiles() {
+	lef := len(m.entryfiles)
+	for i, tef := range m.tempentryfiles {
+		earliestDate := tef.Sdate                           //get the earliest date (it's a sorted array)
+		if m.entryfiles[lef-1].Sdate.Before(earliestDate) { //we need to merge
+			m.entryfiles = append(m.entryfiles, m.tempentryfiles[i:]...)
+			break
+		}
+	}
 }
 
 type fsarconf struct {
@@ -575,7 +583,7 @@ func NewFsarconf(a *fsarchive) *fsarconf {
 //the reason is that we create the channel here and we must
 //return it to the responsewriter and any sends would block
 //without the receiver being ready.
-func (fsc *fsarconf) Get(values url.Values) (api.HdrReply, chan api.Reply) {
+func (fsc fsarconf) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 	retc := make(chan api.Reply)
 	go func() {
 		defer close(retc) //must close the chan to let the listener finish.
@@ -585,8 +593,8 @@ func (fsc *fsarconf) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 			return
 		}
 		if _, ok := values["range"]; ok {
-			if len(*arfiles) > 0 {
-				f := *arfiles
+			if len(arfiles) > 0 {
+				f := arfiles
 				dates := fmt.Sprintf("%s - %s\n", f[0].Sdate, f[len(f)-1].Sdate)
 				retc <- api.Reply{Data: []byte(dates), Err: nil}
 				return
@@ -595,7 +603,7 @@ func (fsc *fsarconf) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 			return
 		}
 		if _, ok := values["files"]; ok {
-			for _, f := range *arfiles {
+			for _, f := range arfiles {
 				retc <- api.Reply{Data: []byte(fmt.Sprintf("%s\n", filepath.Base(f.Path))), Err: nil}
 			}
 			return
@@ -738,43 +746,24 @@ done:
 
 }
 
-func (fsa *fsarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
+func (fsa fsarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 	return handleParams(values, fsa)
 }
 
-func (pba *pbarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
+func (pba pbarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 	return handleParams(values, pba)
 }
 
-func (jsa *jsonarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
+func (jsa jsonarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 	return handleParams(values, jsa)
 }
 
-//func (fsa *mrtarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
-//}
-
-func (fss *fsarstat) Get(values url.Values) (api.HdrReply, chan api.Reply) {
+func (fss fsarstat) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 	return getTimerange(values, fss, api.HdrReply{Code: 200})
 }
 
-func getScanner(file *os.File) (scanner *bufio.Scanner) {
-	fname := file.Name()
-	fext := filepath.Ext(fname)
-	if fext == ".bz2" {
-		//log.Printf("bunzip2 file: %s. opening decompression stream", fname)
-		bzreader := bzip2.NewReader(file)
-		scanner = bufio.NewScanner(bzreader)
-		scanner.Split(ppmrt.SplitMrt)
-	} else {
-		//log.Printf("no extension on file: %s. opening normally", fname)
-		scanner = bufio.NewScanner(file)
-		scanner.Split(ppmrt.SplitMrt)
-	}
-	return
-}
-
-func (ma *fsarchive) getFileIndexRange(ta, tb time.Time) (int, int, int64, error) {
-	ef := *ma.entryfiles
+func (ma fsarchive) getFileIndexRange(ta, tb time.Time) (int, int, int64, error) {
+	ef := ma.entryfiles
 	if len(ef) == 0 {
 		return 0, 0, 0, errempty
 	}
@@ -795,11 +784,11 @@ func (ma *fsarchive) getFileIndexRange(ta, tb time.Time) (int, int, int64, error
 		for ind := 0; ind < len(ef[i].Offsets)-1 && k == 0; ind++ {
 			if ef[i].Offsets[ind].Time.Before(ta.Add(time.Second)) && ef[i].Offsets[ind+1].Time.After(ta) {
 				k = ef[i].Offsets[ind].Pos
-				log.Printf("Seeking to offset %d:%d\n", ind, k)
+				log.Printf("will seek to offset %v:%d\n", ind, k)
 			}
 		}
 	} else {
-		log.Printf("=====NO SEEKING======\n")
+		log.Printf("will not seek\n")
 	}
 
 	if ma.debug {
@@ -873,14 +862,15 @@ func newJsonTransformer() transformer {
 		return []byte(mbsj), nil
 	}
 }
-func transformAndSendBytes(ar *fsarchive, ta, tb time.Time, rc chan<- api.Reply, trans transformer) {
+
+func transformAndSendBytes(ar fsarchive, ta, tb time.Time, rc chan<- api.Reply, trans transformer) {
 	i, j, offPos, err := ar.getFileIndexRange(ta, tb)
 
 	if err != nil {
 		rc <- api.Reply{nil, err}
 		return
 	}
-	ef := *ar.entryfiles
+	ef := ar.entryfiles
 
 	for k := i; k < j; k++ {
 		if ar.debug {
@@ -891,12 +881,14 @@ func transformAndSendBytes(ar *fsarchive, ta, tb time.Time, rc chan<- api.Reply,
 			log.Println("failed opening file: ", ef[k].Path, " ", ferr)
 			continue
 		}
-		scanner := getScanner(file)
-		startt := time.Now()
 		// On the first file scanned, jump to the offset position
 		if k == i {
-			file.Seek(offPos, 0)
+			noff, err := file.Seek(offPos, 0)
+			fmt.Printf("seeked to %v with err:%s\n", noff, err)
 		}
+
+		scanner := util.GetScanner(file)
+		startt := time.Now()
 		for scanner.Scan() {
 			data := scanner.Bytes()
 
@@ -930,7 +922,7 @@ func transformAndSendBytes(ar *fsarchive, ta, tb time.Time, rc chan<- api.Reply,
 
 }
 
-func (ma *fsarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
+func (ma fsarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
 	log.Printf("mrt query from %s to %s\n", ta, tb)
 	//Always add to the waitgroup before calling the go statement.
 	wg.Add(1)
@@ -942,31 +934,31 @@ func (ma *fsarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitG
 	}(retc)
 }
 
-func (pba *pbarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
+func (pba pbarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
 	log.Printf("protobuf query from %s to %s\n", ta, tb)
 	//Always add to the waitgroup before calling the go statement.
 	wg.Add(1)
 	go func(rc chan<- api.Reply) {
 		defer wg.Done()
 		pt := newProtobufTransformer()
-		transformAndSendBytes(pba.fsarchive, ta, tb, rc, pt)
+		transformAndSendBytes(*pba.fsarchive, ta, tb, rc, pt)
 		return
 	}(retc)
 }
 
-func (jsa *jsonarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
+func (jsa jsonarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
 	log.Printf("json query from %s to %s\n", ta, tb)
 	//Always add to the waitgroup before calling the go statement.
 	wg.Add(1)
 	go func(rc chan<- api.Reply) {
 		defer wg.Done()
 		jt := newJsonTransformer()
-		transformAndSendBytes(jsa.fsarchive, ta, tb, rc, jt)
+		transformAndSendBytes(*jsa.fsarchive, ta, tb, rc, jt)
 		return
 	}(retc)
 }
 
-func (fss *fsarstat) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
+func (fss fsarstat) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
 	log.Printf("stat query from %s to %s\n", ta, tb)
 	//Always add to the waitgroup before calling the go statement.
 	wg.Add(1)
@@ -988,7 +980,7 @@ func (fss *fsarstat) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitG
 			rc <- api.Reply{nil, err}
 			return
 		}
-		ef := *ma.entryfiles
+		ef := ma.entryfiles
 		for k := i; k < j; k++ {
 			if fss.debug {
 				log.Printf("opening:%s", ef[k].Path)
@@ -998,7 +990,7 @@ func (fss *fsarstat) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitG
 				log.Println("failed opening file: ", ef[k].Path, " ", ferr)
 				continue
 			}
-			scanner := getScanner(file)
+			scanner := util.GetScanner(file)
 			startt := time.Now()
 			if k == i { //only on the first file to be examined
 				lastTime = ta //set it to the beginning of interval
@@ -1114,6 +1106,9 @@ func (fss *fsarstat) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitG
 	}(retc)
 }
 
+//revisit is run when we need to check for new files that are probably rsynced to the archive.
+//it uses some heuristics to ignore directories from routeviews that would contain stuff we have
+//already indexed. It is called by rescan.
 func (fsa *mrtarchive) revisit(pathname string, f os.FileInfo, err error) error {
 	if f == nil {
 		return errors.New("fileinfo is nil")
@@ -1211,7 +1206,7 @@ func NewMRTArchive(path, descr, colname string, ref int, savepath string, debug 
 func NewFsArchive(path, descr, colname string, ref int, savepath string, debug bool) *fsarchive {
 	return &fsarchive{
 		rootpathstr:    path,
-		entryfiles:     &TimeEntrySlice{},
+		entryfiles:     TimeEntrySlice{},
 		tempentryfiles: TimeEntrySlice{},
 		reqchan:        make(chan string),
 		scanning:       false,
@@ -1231,11 +1226,11 @@ func (fsar *fsarchive) SetTimeDelta(a time.Duration) {
 	fsar.timedelta = a
 }
 
-func (fsar *fsarchive) lastDate() (time.Time, error) {
-	if len(*fsar.entryfiles) == 0 {
+func (fsar fsarchive) lastDate() (time.Time, error) {
+	if len(fsar.entryfiles) == 0 {
 		return time.Now(), errempty
 	}
-	return (*fsar.entryfiles)[len(*fsar.entryfiles)-1].Sdate, nil
+	return fsar.entryfiles[len(fsar.entryfiles)-1].Sdate, nil
 }
 
 //trying to see if a dir name is in YYYY.MM form
@@ -1278,30 +1273,27 @@ func isYearMonthDir(fname string) (res bool, yr int, mon int) {
 	return
 }
 
-func (fsa *fsarchive) printEntries() {
+func (fsa fsarchive) printEntries() {
 	log.Printf("dumping entries")
-	for _, ef := range *fsa.entryfiles {
+	for _, ef := range fsa.entryfiles {
 		fmt.Printf("%s %s\n", ef.Path, ef.Sdate)
 	}
 }
 
 func (fsa *mrtarchive) rescan() {
 	fsa.scanning = true
+	fsa.tempentryfiles = TimeEntrySlice{}
 	filepath.Walk(fsa.rootpathstr, fsa.revisit)
 	sort.Sort(fsa.tempentryfiles)
+	fsa.mergeTempEntryWithEntryFiles()
 }
 
 func (fsa *mrtarchive) scan() {
-	//clear the temp slice
-	//fsa.scanwg.Add(1)
-	fsa.tempentryfiles = []ArchEntryFile{}
 	fsa.scanning = true
-	//fmt.Printf("the type is:%+v\n", reflect.TypeOf(fsa))
+	fsa.tempentryfiles = TimeEntrySlice{}
 	filepath.Walk(fsa.rootpathstr, fsa.visit)
 	sort.Sort(fsa.tempentryfiles)
-	//allow the serve goroutine to unblock in case of STOP.
-	//signal the serve goroutine on scandone channel
-	//fsa.scanch <- struct{}{}
+	fsa.StoreTempEntryFiles()
 }
 
 func (fsa *mrtarchive) Serve(wg, allscanwg *sync.WaitGroup) (reqchan chan<- string) {
@@ -1312,6 +1304,7 @@ func (fsa *mrtarchive) Serve(wg, allscanwg *sync.WaitGroup) (reqchan chan<- stri
 	log.Printf("rescanning every :%v", time.Minute*time.Duration(fsa.refreshmin))
 	wg.Add(1)
 	go func() {
+		fstr := fmt.Sprintf("%s/%s-%s", fsa.savepath, fsa.descriminator, fsa.collectorstr)
 		defer wg.Done()
 		for {
 			select {
@@ -1321,12 +1314,11 @@ func (fsa *mrtarchive) Serve(wg, allscanwg *sync.WaitGroup) (reqchan chan<- stri
 					if fsa.scanning {
 						log.Print("fsarchive: already scanning. ignoring command")
 					} else { //fire an async goroutine to scan the files and wait for SCANDONE
-						log.Printf("fsarchive:%s scanning.", fsa.descriminator)
+						log.Printf("fsarchive:%s scanning.", fstr)
 						allscanwg.Add(1)
 						fsa.scanwg.Add(1)
 						fsa.scan()
 						fsa.scanning = false
-						fsa.entryfiles = &fsa.tempentryfiles
 						fsa.scanwg.Done()
 						allscanwg.Done()
 					}
@@ -1334,20 +1326,19 @@ func (fsa *mrtarchive) Serve(wg, allscanwg *sync.WaitGroup) (reqchan chan<- stri
 					if fsa.scanning {
 						log.Print("fsarchive: already scanning. ignoring command")
 					} else { //fire an async goroutine to scan the files and wait for SCANDONE
-						log.Printf("fsarchive:%s rescanning.", fsa.descriminator)
+						log.Printf("fsarchive:%s rescanning.", fstr)
 						fsa.rescan()
-						fsa.scanning = false
-						fsa.entryfiles = &fsa.tempentryfiles
-						errg := fsa.tempentryfiles.ToGobFile(fmt.Sprintf("%s/%s", fsa.savepath, fsa.descriminator))
+						errg := fsa.Save(fstr)
 						if errg != nil {
 							log.Println(errg)
 						} else {
-							log.Printf("succesfully rewrote serialized file for archive:%s", fsa.descriminator)
+							log.Printf("succesfully rewrote serialized file:%s for archive:%s", fstr, fsa.descriminator)
 						}
+						fsa.scanning = false
 					}
 				case "DUMPENTRIES":
 					if fsa.scanning {
-						log.Printf("fsar: warning. scanning in progress", fsa.descriminator)
+						log.Printf("fsar:%s warning. scanning in progress", fsa.descriminator)
 					}
 					fsa.printEntries()
 				case "STOP":
@@ -1362,17 +1353,16 @@ func (fsa *mrtarchive) Serve(wg, allscanwg *sync.WaitGroup) (reqchan chan<- stri
 				if fsa.scanning {
 					log.Print("fsarchive: already scanning. ignoring command")
 				} else { //fire an async goroutine to scan the files and wait for SCANDONE
-					log.Printf("fsarchive:%s rescanning.", fsa.descriminator)
+					log.Printf("fsarchive:%s rescanning.", fstr)
 					fsa.rescan()
-					fsa.scanning = false
-					fsa.entryfiles = &fsa.tempentryfiles
 					//rewrite the file
-					errg := fsa.tempentryfiles.ToGobFile(fmt.Sprintf("%s/%s-%s", fsa.savepath, fsa.descriminator, fsa.collectorstr))
+					errg := fsa.Save(fstr)
 					if errg != nil {
 						log.Println(errg)
 					} else {
-						log.Printf("succesfully rewrote serialized file for archive:%s", fsa.descriminator)
+						log.Printf("succesfully rewrote serialized file:%s for archive:%s", fstr, fsa.descriminator)
 					}
+					fsa.scanning = false
 				}
 			}
 		}

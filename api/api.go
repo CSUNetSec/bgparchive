@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	hpp "net/http/pprof"
 	"net/url"
 	"strings"
 )
@@ -95,7 +96,6 @@ func (api *API) requestHandlerFunc(resource Resource) http.HandlerFunc {
 		rw.Header().Set("Access-Control-Allow-Origin", "*")
 		rw.WriteHeader(code.Code)
 		if datac != nil { // we got a proper channel to get datafrom
-			//go func(dc <-chan Reply) { // fire a goroutine that will end upon the chan getting closed
 			for r := range datac {
 				if r.Err == nil {
 					rw.Write(r.Data)
@@ -104,7 +104,6 @@ func (api *API) requestHandlerFunc(resource Resource) http.HandlerFunc {
 					rw.Write([]byte(fmt.Sprintf("%s\n", r.Err)))
 				}
 			}
-			//}(datac)
 		}
 	}
 }
@@ -113,7 +112,14 @@ func (api *API) AddResource(resource Resource, path string) {
 	api.mux.HandleFunc(path, api.requestHandlerFunc(resource))
 }
 
-func (api *API) Start(port int) {
+func (api *API) Start(port int, debug bool) {
 	portstr := fmt.Sprintf(":%d", port)
+	if debug {
+		api.mux.Handle("/debug/pprof/", http.HandlerFunc(hpp.Index))
+		api.mux.Handle("/debug/pprof/cmdline", http.HandlerFunc(hpp.Cmdline))
+		api.mux.Handle("/debug/pprof/profile", http.HandlerFunc(hpp.Profile))
+		api.mux.Handle("/debug/pprof/symbol", http.HandlerFunc(hpp.Symbol))
+	}
 	http.ListenAndServe(portstr, api.mux)
+
 }

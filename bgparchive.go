@@ -157,29 +157,15 @@ type contarchive interface {
 	contpuller
 }
 
-type EntryOffset struct {
-	Time time.Time
-	Pos  int64
-}
-
-func ItemOffsToEntryOffs(a []util.ItemOffset) []EntryOffset {
-	ret := make([]EntryOffset, len(a))
-	for ct, offset := range a {
-		ret[ct] = EntryOffset{offset.Value.(time.Time), offset.Off}
-	}
-	return ret
-}
-
 //implements Sort interface by time.Time
 type ArchEntryFile struct {
-	Path    string
-	Sdate   time.Time
-	Sz      int64
-	Offsets []EntryOffset
+	Path  string
+	Sdate time.Time
+	Sz    int64
 }
 
 func (a ArchEntryFile) String() string {
-	return fmt.Sprintf("[path:%s date:%v size:%d offsets:%v]", a.Path, a.Sdate, a.Sz, a.Offsets)
+	return fmt.Sprintf("[path:%s date:%v size:%d]", a.Path, a.Sdate, a.Sz)
 }
 
 type TimeEntrySlice []ArchEntryFile
@@ -249,6 +235,9 @@ func (f *fsarchive) ToGobFile(fname string) (err error) {
 	}
 
 	err = ioutil.WriteFile(fname, buf.Bytes(), 0600)
+	if err != nil {
+		log.Printf("ToGobFile error:%s", err)
+	}
 	return
 }
 
@@ -260,6 +249,9 @@ func (f *fsarchive) FromGobFile(fname string) (err error) {
 	p := bytes.NewBuffer(n)
 	dec := gob.NewDecoder(p)
 	err = dec.Decode(&(f.entryfiles))
+	if err != nil {
+		log.Printf("FromGobFile error:%s", err)
+	}
 	return
 }
 
@@ -762,13 +754,13 @@ func (fss fsarstat) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 	return getTimerange(values, fss, api.HdrReply{Code: 200})
 }
 
-func (ma fsarchive) getFileIndexRange(ta, tb time.Time) (int, int, int64, error) {
+func (ma fsarchive) getFileIndexRange(ta, tb time.Time) (int, int, error) {
 	ef := ma.entryfiles
 	if len(ef) == 0 {
-		return 0, 0, 0, errempty
+		return 0, 0, errempty
 	}
 	if tb.Before(ef[0].Sdate) || ta.After(ef[len(ef)-1].Sdate.Add(ma.timedelta)) {
-		return 0, 0, 0, errdate
+		return 0, 0, errdate
 	}
 	i := sort.Search(len(ef), func(i int) bool {
 		return ef[i].Sdate.After(ta.Add(-ma.timedelta - time.Second))
@@ -777,24 +769,10 @@ func (ma fsarchive) getFileIndexRange(ta, tb time.Time) (int, int, int64, error)
 		return ef[i].Sdate.After(tb)
 	})
 
-	//This code finds the index of the offset where the request is starting.
-	// offsets[k] < ta < offsets[k+1]
-	var k int64 = 0
-	if ef[i].Offsets != nil && ef[i].Offsets[0].Time.Before(ta) {
-		for ind := 0; ind < len(ef[i].Offsets)-1 && k == 0; ind++ {
-			if ef[i].Offsets[ind].Time.Before(ta.Add(time.Second)) && ef[i].Offsets[ind+1].Time.After(ta) {
-				k = ef[i].Offsets[ind].Pos
-				log.Printf("will seek to offset %v:%d\n", ind, k)
-			}
-		}
-	} else {
-		log.Printf("will not seek\n")
-	}
-
 	if ma.debug {
 		log.Printf("indexes [i:%d j:%d]", i, j)
 	}
-	return i, j, k, nil
+	return i, j, nil
 }
 
 type transformer func([]byte) ([]byte, error)
@@ -864,7 +842,7 @@ func newJsonTransformer() transformer {
 }
 
 func transformAndSendBytes(ar fsarchive, ta, tb time.Time, rc chan<- api.Reply, trans transformer) {
-	i, j, offPos, err := ar.getFileIndexRange(ta, tb)
+	i, j, err := ar.getFileIndexRange(ta, tb)
 
 	if err != nil {
 		rc <- api.Reply{nil, err}
@@ -881,12 +859,6 @@ func transformAndSendBytes(ar fsarchive, ta, tb time.Time, rc chan<- api.Reply, 
 			log.Println("failed opening file: ", ef[k].Path, " ", ferr)
 			continue
 		}
-		// On the first file scanned, jump to the offset position
-		if k == i {
-			noff, err := file.Seek(offPos, 0)
-			fmt.Printf("seeked to %v with err:%s\n", noff, err)
-		}
-
 		scanner := util.GetScanner(file)
 		startt := time.Now()
 		for scanner.Scan() {
@@ -974,7 +946,7 @@ func (fss fsarstat) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGr
 		)
 		defer wg.Done()
 		ma := fss.fsarchive
-		i, j, offPos, err := ma.getFileIndexRange(ta, tb)
+		i, j, err := ma.getFileIndexRange(ta, tb)
 
 		if err != nil {
 			rc <- api.Reply{nil, err}
@@ -994,7 +966,6 @@ func (fss fsarstat) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGr
 			startt := time.Now()
 			if k == i { //only on the first file to be examined
 				lastTime = ta //set it to the beginning of interval
-				file.Seek(offPos, 0)
 			}
 			for scanner.Scan() {
 				data := scanner.Bytes()
@@ -1156,16 +1127,16 @@ func (fsa *mrtarchive) revisit(pathname string, f os.FileInfo, err error) error 
 		if fstr := path.Base(pathname); len(fstr) > 0 && fstr[0] == '.' {
 			return nil
 		}
-		time, offs, errtime := util.GetFirstDateAndOffsets(pathname)
+		time, errtime := util.GetFirstDate(pathname)
 		if errtime != nil {
 			if fsa.debug {
-				log.Print("GetFirstDateAndOffsets failed on file: ", fname, " that should be in fooHHMM format with error: ", errtime)
+				log.Print("GetFirstDate failed on file: ", fname, " that should be in fooHHMM format with error: ", errtime)
 			}
 			return nil
 		}
 		if time.After(ld) { // only add files that are later than current lastdate.
 			log.Printf("adding file:%s with date:%v to the archive\n", pathname, time)
-			fsa.tempentryfiles = append(fsa.tempentryfiles, ArchEntryFile{Path: pathname, Sdate: time, Sz: f.Size(), Offsets: ItemOffsToEntryOffs(offs)})
+			fsa.tempentryfiles = append(fsa.tempentryfiles, ArchEntryFile{Path: pathname, Sdate: time, Sz: f.Size()})
 		} else {
 			//log.Printf("on: %s time:%v not later than last archived time:%v", fname, time, ld)
 		}
@@ -1187,14 +1158,14 @@ func (fsa *mrtarchive) visit(pathname string, f os.FileInfo, err error) error {
 		if fstr := path.Base(pathname); len(fstr) > 0 && fstr[0] == '.' {
 			return nil
 		}
-		time, offs, errtime := util.GetFirstDateAndOffsets(pathname)
+		time, errtime := util.GetFirstDate(pathname)
 		if errtime != nil {
 			if fsa.debug {
 				log.Print("time.Parse() failed on file: ", fname, " that should be in fooHHMM format with error: ", errtime)
 			}
 			return nil
 		}
-		fsa.tempentryfiles = append(fsa.tempentryfiles, ArchEntryFile{Path: pathname, Sdate: time, Sz: f.Size(), Offsets: ItemOffsToEntryOffs(offs)})
+		fsa.tempentryfiles = append(fsa.tempentryfiles, ArchEntryFile{Path: pathname, Sdate: time, Sz: f.Size()})
 	}
 	return nil
 }

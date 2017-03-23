@@ -842,6 +842,10 @@ func newJsonTransformer() transformer {
 }
 
 func transformAndSendBytes(ar fsarchive, ta, tb time.Time, rc chan<- api.Reply, trans transformer) {
+	var (
+		transdata []byte
+		terr      error
+	)
 	i, j, err := ar.getFileIndexRange(ta, tb)
 
 	if err != nil {
@@ -864,25 +868,25 @@ func transformAndSendBytes(ar fsarchive, ta, tb time.Time, rc chan<- api.Reply, 
 		for scanner.Scan() {
 			data := scanner.Bytes()
 
-			hdrbuf := ppmrt.NewMrtHdrBuf(data)
-			_, err := hdrbuf.Parse()
-			if err != nil {
+			if len(data) < 4 {
 				log.Printf("error in creating MRT header:%s", err)
 				rc <- api.Reply{Data: nil, Err: err}
 				continue
 			}
-			hdr := hdrbuf.GetHeader()
-			msgtime := time.Unix(int64(hdr.Timestamp), 0)
+			msgtime := time.Unix(int64(binary.BigEndian.Uint32(data[:4])), 0)
 			if msgtime.After(ta.Add(-time.Second)) && msgtime.Before(tb.Add(time.Second)) {
 				//documenation was saying that the Bytes() returnned from a scanner
 				//can be overwritten by subsequent calls to Scan().
 				//if we don't copy the bytes here, we have an awful race.
 				if trans != nil {
-					data, err = trans(data)
+					transdata, terr = trans(data)
+				} else {
+					transdata, terr = data, nil
 				}
-				cp := make([]byte, len(data))
-				copy(cp, data)
-				rc <- api.Reply{Data: cp, Err: err}
+				//dsp:on a second though this might not end up in a race due to channel block before the next write.
+				//cp := make([]byte, len(data))
+				//copy(cp, data)
+				rc <- api.Reply{Data: transdata, Err: terr}
 			}
 		}
 		if err := scanner.Err(); err != nil && err != io.EOF {

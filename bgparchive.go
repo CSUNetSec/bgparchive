@@ -99,7 +99,7 @@ var (
 )
 
 type HelpMsg struct {
-	ars []*fsarconf
+	ars []fsarconf
 	api.PutNotAllowed
 	api.PostNotAllowed
 	api.DeleteNotAllowed
@@ -129,7 +129,7 @@ func riborupdatestr(a string) string {
 	return strings.ToLower(a)
 }
 
-func (h *HelpMsg) AddArchive(ar *fsarconf) {
+func (h *HelpMsg) AddArchive(ar fsarconf) {
 	h.ars = append(h.ars, ar)
 }
 

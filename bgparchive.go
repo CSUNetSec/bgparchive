@@ -207,6 +207,7 @@ type fsarchive struct {
 	collectorstr string
 	debug        bool
 	savepath     string
+	efmux        sync.RWMutex
 	//present the archive as a restful resource
 	api.PutNotAllowed
 	api.PostNotAllowed
@@ -217,40 +218,46 @@ func (f fsarchive) getContextChans() (chan contCmd, chan contCli) {
 	return f.contctx.reqch, f.contctx.repch
 }
 
-func (f fsarchive) GetDateRangeString() string {
-	if len(f.entryfiles) > 0 {
-		files := f.entryfiles
-		dates := fmt.Sprintf("%s - %s\n", files[0].Sdate, files[len(files)-1].Sdate)
+func (f *fsarchive) GetDateRangeString() string {
+	f.efmux.RLock()
+	ef := f.entryfiles
+	f.efmux.RUnlock()
+	if len(ef) > 0 {
+		dates := fmt.Sprintf("%s - %s\n", ef[0].Sdate, ef[len(ef)-1].Sdate)
 		return dates
 	}
 	return "archive is empty\n"
 }
 
-func (f *fsarchive) ToGobFile(fname string) (err error) {
+func (f *fsarchive) toGobFile(fname string) (err error) {
 	buf := new(bytes.Buffer)
 	enc := gob.NewEncoder(buf)
+	f.efmux.RLock()
 	err = enc.Encode(f.entryfiles)
+	f.efmux.RUnlock()
 	if err != nil {
 		return
 	}
 
 	err = ioutil.WriteFile(fname, buf.Bytes(), 0600)
 	if err != nil {
-		log.Printf("ToGobFile error:%s", err)
+		log.Printf("toGobFile error:%s", err)
 	}
 	return
 }
 
-func (f *fsarchive) FromGobFile(fname string) (err error) {
+func (f *fsarchive) fromGobFile(fname string) (err error) {
 	n, err := ioutil.ReadFile(fname)
 	if err != nil {
 		return
 	}
 	p := bytes.NewBuffer(n)
 	dec := gob.NewDecoder(p)
+	f.efmux.Lock()
 	err = dec.Decode(&(f.entryfiles))
+	f.efmux.Unlock()
 	if err != nil {
-		log.Printf("FromGobFile error:%s", err)
+		log.Printf("fromGobFile error:%s", err)
 	}
 	return
 }
@@ -521,11 +528,11 @@ func (m mrtarchive) GetScanWaitGroup() *sync.WaitGroup {
 }
 
 func (m *mrtarchive) Save(a string) error {
-	return m.ToGobFile(a)
+	return m.toGobFile(a)
 }
 
 func (m *mrtarchive) Load(a string) error {
-	return m.FromGobFile(a)
+	return m.fromGobFile(a)
 }
 
 func (m mrtarchive) GetReqChan() chan string {
@@ -533,11 +540,15 @@ func (m mrtarchive) GetReqChan() chan string {
 }
 
 func (m *mrtarchive) StoreTempEntryFiles() {
+	m.efmux.Lock()
+	defer m.efmux.Unlock()
 	m.entryfiles = make(TimeEntrySlice, len(m.tempentryfiles))
 	copy(m.entryfiles, m.tempentryfiles)
 }
 
 func (m *mrtarchive) mergeTempEntryWithEntryFiles() {
+	m.efmux.Lock()
+	defer m.efmux.Unlock()
 	lef := len(m.entryfiles)
 	for i, tef := range m.tempentryfiles {
 		earliestDate := tef.Sdate                           //get the earliest date (it's a sorted array)
@@ -575,11 +586,13 @@ func NewFsarconf(a *fsarchive) *fsarconf {
 //the reason is that we create the channel here and we must
 //return it to the responsewriter and any sends would block
 //without the receiver being ready.
-func (fsc fsarconf) Get(values url.Values) (api.HdrReply, chan api.Reply) {
+func (fsc *fsarconf) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 	retc := make(chan api.Reply)
-	go func() {
+	go func(fc *fsarconf) {
 		defer close(retc) //must close the chan to let the listener finish.
-		arfiles := fsc.fsarchive.entryfiles
+		fc.efmux.RLock()
+		arfiles := fc.fsarchive.entryfiles
+		fc.efmux.RUnlock()
 		if arfiles == nil {
 			log.Printf("nil arfile in fsarconf. ignoring request\n")
 			return
@@ -601,7 +614,7 @@ func (fsc fsarconf) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 			return
 		}
 		return
-	}()
+	}(fsc)
 	return api.HdrReply{Code: 200}, retc
 }
 
@@ -738,24 +751,26 @@ done:
 
 }
 
-func (fsa fsarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
+func (fsa *fsarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 	return handleParams(values, fsa)
 }
 
-func (pba pbarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
+func (pba *pbarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 	return handleParams(values, pba)
 }
 
-func (jsa jsonarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
+func (jsa *jsonarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 	return handleParams(values, jsa)
 }
 
-func (fss fsarstat) Get(values url.Values) (api.HdrReply, chan api.Reply) {
+func (fss *fsarstat) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 	return getTimerange(values, fss, api.HdrReply{Code: 200})
 }
 
-func (ma fsarchive) getFileIndexRange(ta, tb time.Time) (int, int, error) {
+func (ma *fsarchive) getFileIndexRange(ta, tb time.Time) (int, int, error) {
+	ma.efmux.RLock()
 	ef := ma.entryfiles
+	ma.efmux.RUnlock()
 	if len(ef) == 0 {
 		return 0, 0, errempty
 	}
@@ -841,7 +856,7 @@ func newJsonTransformer() transformer {
 	}
 }
 
-func transformAndSendBytes(ar fsarchive, ta, tb time.Time, rc chan<- api.Reply, trans transformer) {
+func transformAndSendBytes(ar *fsarchive, ta, tb time.Time, rc chan<- api.Reply, trans transformer) {
 	var (
 		transdata []byte
 		terr      error
@@ -852,7 +867,9 @@ func transformAndSendBytes(ar fsarchive, ta, tb time.Time, rc chan<- api.Reply, 
 		rc <- api.Reply{nil, err}
 		return
 	}
+	ar.efmux.RLock()
 	ef := ar.entryfiles
+	ar.efmux.RUnlock()
 
 	for k := i; k < j; k++ {
 		if ar.debug {
@@ -898,7 +915,7 @@ func transformAndSendBytes(ar fsarchive, ta, tb time.Time, rc chan<- api.Reply, 
 
 }
 
-func (ma fsarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
+func (ma *fsarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
 	log.Printf("mrt query from %s to %s\n", ta, tb)
 	//Always add to the waitgroup before calling the go statement.
 	wg.Add(1)
@@ -910,31 +927,31 @@ func (ma fsarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGr
 	}(retc)
 }
 
-func (pba pbarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
+func (pba *pbarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
 	log.Printf("protobuf query from %s to %s\n", ta, tb)
 	//Always add to the waitgroup before calling the go statement.
 	wg.Add(1)
 	go func(rc chan<- api.Reply) {
 		defer wg.Done()
 		pt := newProtobufTransformer()
-		transformAndSendBytes(*pba.fsarchive, ta, tb, rc, pt)
+		transformAndSendBytes(pba.fsarchive, ta, tb, rc, pt)
 		return
 	}(retc)
 }
 
-func (jsa jsonarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
+func (jsa *jsonarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
 	log.Printf("json query from %s to %s\n", ta, tb)
 	//Always add to the waitgroup before calling the go statement.
 	wg.Add(1)
 	go func(rc chan<- api.Reply) {
 		defer wg.Done()
 		jt := newJsonTransformer()
-		transformAndSendBytes(*jsa.fsarchive, ta, tb, rc, jt)
+		transformAndSendBytes(jsa.fsarchive, ta, tb, rc, jt)
 		return
 	}(retc)
 }
 
-func (fss fsarstat) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
+func (fss *fsarstat) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
 	log.Printf("stat query from %s to %s\n", ta, tb)
 	//Always add to the waitgroup before calling the go statement.
 	wg.Add(1)
@@ -956,7 +973,9 @@ func (fss fsarstat) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGr
 			rc <- api.Reply{nil, err}
 			return
 		}
+		fss.efmux.RLock()
 		ef := ma.entryfiles
+		fss.efmux.RUnlock()
 		for k := i; k < j; k++ {
 			if fss.debug {
 				log.Printf("opening:%s", ef[k].Path)
@@ -1201,7 +1220,9 @@ func (fsar *fsarchive) SetTimeDelta(a time.Duration) {
 	fsar.timedelta = a
 }
 
-func (fsar fsarchive) lastDate() (time.Time, error) {
+func (fsar *fsarchive) lastDate() (time.Time, error) {
+	fsar.efmux.RLock()
+	defer fsar.efmux.RUnlock()
 	if len(fsar.entryfiles) == 0 {
 		return time.Now(), errempty
 	}
@@ -1248,10 +1269,13 @@ func isYearMonthDir(fname string) (res bool, yr int, mon int) {
 	return
 }
 
-func (fsa fsarchive) printEntries() {
+func (fsa *fsarchive) printEntries() {
 	log.Printf("dumping entries")
-	for _, ef := range fsa.entryfiles {
-		fmt.Printf("%s %s\n", ef.Path, ef.Sdate)
+	fsa.efmux.RLock()
+	ef := fsa.entryfiles
+	fsa.efmux.RUnlock()
+	for _, f := range ef {
+		fmt.Printf("%s %s\n", f.Path, f.Sdate)
 	}
 }
 

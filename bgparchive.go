@@ -218,7 +218,7 @@ type fsarchive struct {
 }
 
 //implement the helpMessager interface
-func (f *fsarchive) getHelpMessage() string {
+func (f fsarchive) getHelpMessage() string {
 	return fmt.Sprintf("\t%-8s archive: %-25s\trange:%s", riborupdatestr(f.descriminator), f.GetCollectorString(), f.GetDateRangeString())
 }
 

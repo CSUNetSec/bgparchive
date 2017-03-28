@@ -1,9 +1,7 @@
 package bgparchive
 
 import (
-	"bufio"
 	"bytes"
-	"compress/bzip2"
 	"context"
 	"encoding/binary"
 	"encoding/gob"
@@ -102,7 +100,7 @@ var (
 )
 
 type HelpMsg struct {
-	ars []*fsarconf
+	ars []helpMessager
 	api.PutNotAllowed
 	api.PostNotAllowed
 	api.DeleteNotAllowed
@@ -111,18 +109,17 @@ type HelpMsg struct {
 //TODO: does this function need context?
 func (h *HelpMsg) Get(ctx context.Context, values url.Values) (api.HdrReply, chan api.Reply) {
 	retc := make(chan api.Reply)
-	go func() {
-		defer close(retc)
-		retc <- api.Reply{Data: []byte(fmt.Sprintf("%s\n", HELPSTR)), Err: nil}
+	go func(rch chan api.Reply) {
+		defer close(rch)
+		rch <- api.Reply{Data: []byte(fmt.Sprintf("%s\n", HELPSTR)), Err: nil}
 		for i := range h.ars {
 			if util.NBContextClosed(ctx) {
 				break
 			}
-			arstr := fmt.Sprintf("\t%-8s archive: %-25s\trange:%s", riborupdatestr(h.ars[i].descriminator), h.ars[i].GetCollectorString(), h.ars[i].GetDateRangeString())
-			retc <- api.Reply{Data: []byte(arstr), Err: nil}
+			rch <- api.Reply{Data: []byte(h.ars[i].getHelpMessage()), Err: nil}
 		}
 		return
-	}()
+	}(retc)
 	return api.HdrReply{Code: 200}, retc
 
 }
@@ -136,7 +133,7 @@ func riborupdatestr(a string) string {
 	return strings.ToLower(a)
 }
 
-func (h *HelpMsg) AddArchive(ar *fsarconf) {
+func (h *HelpMsg) AddArchive(ar helpMessager) {
 	h.ars = append(h.ars, ar)
 }
 
@@ -164,29 +161,19 @@ type contarchive interface {
 	contpuller
 }
 
-type EntryOffset struct {
-	Time time.Time
-	Pos  int64
-}
-
-func ItemOffsToEntryOffs(a []util.ItemOffset) []EntryOffset {
-	ret := make([]EntryOffset, len(a))
-	for ct, offset := range a {
-		ret[ct] = EntryOffset{offset.Value.(time.Time), offset.Off}
-	}
-	return ret
+type helpMessager interface {
+	getHelpMessage() string
 }
 
 //implements Sort interface by time.Time
 type ArchEntryFile struct {
-	Path    string
-	Sdate   time.Time
-	Sz      int64
-	Offsets []EntryOffset
+	Path  string
+	Sdate time.Time
+	Sz    int64
 }
 
 func (a ArchEntryFile) String() string {
-	return fmt.Sprintf("[path:%s date:%v size:%d offsets:%v]", a.Path, a.Sdate.UTC(), a.Sz, a.Offsets)
+	return fmt.Sprintf("[path:%s date:%v size:%d]", a.Path, a.Sdate, a.Sz)
 }
 
 type TimeEntrySlice []ArchEntryFile
@@ -197,31 +184,6 @@ func (a TimeEntrySlice) String() string {
 		ret = append(ret, v.String())
 	}
 	return strings.Join(ret, " ")
-}
-
-func (t *TimeEntrySlice) ToGobFile(fname string) (err error) {
-	m := new(bytes.Buffer)
-	enc := gob.NewEncoder(m)
-	//fmt.Printf("before encoding it is :%s", t)
-	err = enc.Encode(t)
-	if err != nil {
-		return
-	}
-
-	err = ioutil.WriteFile(fname, m.Bytes(), 0600)
-	return
-}
-
-func (t *TimeEntrySlice) FromGobFile(fname string) (err error) {
-	n, err := ioutil.ReadFile(fname)
-	if err != nil {
-		return
-	}
-	p := bytes.NewBuffer(n)
-	dec := gob.NewDecoder(p)
-	err = dec.Decode(t)
-	//fmt.Printf("after decoding it is :%s", t)
-	return
 }
 
 func (p TimeEntrySlice) Len() int {
@@ -238,7 +200,7 @@ func (p TimeEntrySlice) Swap(i, j int) {
 
 type fsarchive struct {
 	rootpathstr    string
-	entryfiles     *TimeEntrySlice
+	entryfiles     TimeEntrySlice
 	tempentryfiles TimeEntrySlice
 	reqchan        chan string
 	scanning       bool
@@ -249,30 +211,71 @@ type fsarchive struct {
 	refreshmin     int
 	//this context will allow us to communicate with the continuous pull client goroutine
 	contctx *contCtx
-	//collctor name that is used in the url as well as the saved index files
+	//collector name that is used in the url as well as the saved index files
 	collectorstr string
 	debug        bool
 	savepath     string
+	efmux        sync.RWMutex
 	//present the archive as a restful resource
 	api.PutNotAllowed
 	api.PostNotAllowed
 	api.DeleteNotAllowed
 }
 
-func (f *fsarchive) getContextChans() (chan contCmd, chan contCli) {
+//implement the helpMessager interface
+func (f *fsarchive) getHelpMessage() string {
+	return fmt.Sprintf("\t%-8s archive: %-25s\trange:%s", riborupdatestr(f.descriminator), f.GetCollectorString(), f.GetDateRangeString())
+}
+
+func (f fsarchive) getContextChans() (chan contCmd, chan contCli) {
 	return f.contctx.reqch, f.contctx.repch
 }
 
 func (f *fsarchive) GetDateRangeString() string {
-	if len(*(f.entryfiles)) > 0 {
-		files := *(f.entryfiles)
-		dates := fmt.Sprintf("%s - %s\n", files[0].Sdate.UTC(), files[len(files)-1].Sdate.UTC())
+	f.efmux.RLock()
+	ef := f.entryfiles
+	f.efmux.RUnlock()
+	if len(ef) > 0 {
+		dates := fmt.Sprintf("%s - %s\n", ef[0].Sdate, ef[len(ef)-1].Sdate)
 		return dates
 	}
 	return "archive is empty\n"
 }
 
-func (f *fsarchive) GetCollectorString() string {
+func (f *fsarchive) toGobFile(fname string) (err error) {
+	buf := new(bytes.Buffer)
+	enc := gob.NewEncoder(buf)
+	f.efmux.RLock()
+	err = enc.Encode(f.entryfiles)
+	f.efmux.RUnlock()
+	if err != nil {
+		return
+	}
+
+	err = ioutil.WriteFile(fname, buf.Bytes(), 0600)
+	if err != nil {
+		log.Printf("toGobFile error:%s", err)
+	}
+	return
+}
+
+func (f *fsarchive) fromGobFile(fname string) (err error) {
+	n, err := ioutil.ReadFile(fname)
+	if err != nil {
+		return
+	}
+	p := bytes.NewBuffer(n)
+	dec := gob.NewDecoder(p)
+	f.efmux.Lock()
+	err = dec.Decode(&(f.entryfiles))
+	f.efmux.Unlock()
+	if err != nil {
+		log.Printf("fromGobFile error:%s", err)
+	}
+	return
+}
+
+func (f fsarchive) GetCollectorString() string {
 	return f.collectorstr
 }
 
@@ -376,17 +379,17 @@ func (ctx *contCtx) Del(a *contCli) error {
 	return nil
 }
 
-func (ctx *contCtx) ExistsId(a string) bool {
+func (ctx contCtx) ExistsId(a string) bool {
 	_, ok := ctx.contuuid[a]
 	return ok
 }
 
-func (ctx *contCtx) ExistsIP(a string) bool {
+func (ctx contCtx) ExistsIP(a string) bool {
 	_, ok := ctx.contclis[a]
 	return ok
 }
 
-func (ctx *contCtx) GetIDsfromIP(a string) (ret []string) {
+func (ctx contCtx) GetIDsfromIP(a string) (ret []string) {
 	cclis, ok := ctx.contclis[a]
 	if ok {
 		for i := range cclis {
@@ -426,7 +429,7 @@ func (ctx *contCtx) UpdateCli(a *contCli) {
 	ctx.PrintClis()
 }
 
-func (ctx *contCtx) PrintClis() {
+func (ctx contCtx) PrintClis() {
 	log.Printf("PRINTING")
 	for k, v := range ctx.contclis {
 		log.Printf("by IP key:%v val:%v", k, v)
@@ -452,7 +455,7 @@ func setTimer(a *contCli, expirech chan *contCli) {
 }
 
 //serve just fires the goroutine that handles the continuous pulling
-func (ctx *contCtx) Serve() {
+func (ctx contCtx) Serve() {
 	//this is the goroutine that is the main event loop for the continuous pulling engine
 	go func() {
 		expirech := make(chan *contCli) //this is the aggregate channel that the timer goroutines will write their expiration
@@ -529,28 +532,44 @@ func NewJsonArchive(a *fsarchive) *jsonarchive {
 
 type MrtArchives []*mrtarchive
 
-func (m *mrtarchive) GetFsArchive() *fsarchive {
+func (m mrtarchive) GetFsArchive() *fsarchive {
 	return m.fsarchive
 }
 
-func (m *mrtarchive) GetScanWaitGroup() *sync.WaitGroup {
+func (m mrtarchive) GetScanWaitGroup() *sync.WaitGroup {
 	return m.scanwg
 }
 
 func (m *mrtarchive) Save(a string) error {
-	return m.tempentryfiles.ToGobFile(a)
+	return m.toGobFile(a)
 }
 
 func (m *mrtarchive) Load(a string) error {
-	return m.tempentryfiles.FromGobFile(a)
+	return m.fromGobFile(a)
 }
 
-func (m *mrtarchive) GetReqChan() chan string {
+func (m mrtarchive) GetReqChan() chan string {
 	return m.reqchan
 }
 
-func (m *mrtarchive) SetEntryFilesToTemp() {
-	m.entryfiles = &m.tempentryfiles
+func (m *mrtarchive) StoreTempEntryFiles() {
+	m.efmux.Lock()
+	defer m.efmux.Unlock()
+	m.entryfiles = make(TimeEntrySlice, len(m.tempentryfiles))
+	copy(m.entryfiles, m.tempentryfiles)
+}
+
+func (m *mrtarchive) mergeTempEntryWithEntryFiles() {
+	m.efmux.Lock()
+	defer m.efmux.Unlock()
+	lef := len(m.entryfiles)
+	for i, tef := range m.tempentryfiles {
+		earliestDate := tef.Sdate                           //get the earliest date (it's a sorted array)
+		if m.entryfiles[lef-1].Sdate.Before(earliestDate) { //we need to merge
+			m.entryfiles = append(m.entryfiles, m.tempentryfiles[i:]...)
+			break
+		}
+	}
 }
 
 type fsarconf struct {
@@ -582,17 +601,19 @@ func NewFsarconf(a *fsarchive) *fsarconf {
 //without the receiver being ready.
 func (fsc *fsarconf) Get(ctx context.Context, values url.Values) (api.HdrReply, chan api.Reply) {
 	retc := make(chan api.Reply)
-	go func(cont context.Context) {
+	go func(fc *fsarconf, cont context.Context) {
 		defer close(retc) //must close the chan to let the listener finish.
-		arfiles := fsc.fsarchive.entryfiles
+		fc.efmux.RLock()
+		arfiles := fc.fsarchive.entryfiles
+		fc.efmux.RUnlock()
 		if arfiles == nil {
 			log.Printf("nil arfile in fsarconf. ignoring request\n")
 			return
 		}
 		if _, ok := values["range"]; ok {
-			if len(*arfiles) > 0 {
-				f := *arfiles
-				dates := fmt.Sprintf("%s - %s\n", f[0].Sdate.UTC(), f[len(f)-1].Sdate.UTC())
+			if len(arfiles) > 0 {
+				f := arfiles
+				dates := fmt.Sprintf("%s - %s\n", f[0].Sdate, f[len(f)-1].Sdate)
 				retc <- api.Reply{Data: []byte(dates), Err: nil}
 				return
 			}
@@ -600,7 +621,7 @@ func (fsc *fsarconf) Get(ctx context.Context, values url.Values) (api.HdrReply, 
 			return
 		}
 		if _, ok := values["files"]; ok {
-			for _, f := range *arfiles {
+			for _, f := range arfiles {
 				if util.NBContextClosed(cont) {
 					break
 				}
@@ -609,7 +630,7 @@ func (fsc *fsarconf) Get(ctx context.Context, values url.Values) (api.HdrReply, 
 			return
 		}
 		return
-	}(ctx)
+	}(fsc, ctx)
 	return api.HdrReply{Code: 200}, retc
 }
 
@@ -760,36 +781,19 @@ func (jsa *jsonarchive) Get(ctx context.Context, values url.Values) (api.HdrRepl
 	return handleParams(ctx, values, jsa)
 }
 
-//func (fsa *mrtarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
-//}
-
 func (fss *fsarstat) Get(ctx context.Context, values url.Values) (api.HdrReply, chan api.Reply) {
 	return getTimerange(ctx, values, fss, api.HdrReply{Code: 200})
 }
 
-func getScanner(file *os.File) (scanner *bufio.Scanner) {
-	fname := file.Name()
-	fext := filepath.Ext(fname)
-	if fext == ".bz2" {
-		//log.Printf("bunzip2 file: %s. opening decompression stream", fname)
-		bzreader := bzip2.NewReader(file)
-		scanner = bufio.NewScanner(bzreader)
-		scanner.Split(ppmrt.SplitMrt)
-	} else {
-		//log.Printf("no extension on file: %s. opening normally", fname)
-		scanner = bufio.NewScanner(file)
-		scanner.Split(ppmrt.SplitMrt)
-	}
-	return
-}
-
-func (ma *fsarchive) getFileIndexRange(ta, tb time.Time) (int, int, int64, error) {
-	ef := *ma.entryfiles
+func (ma *fsarchive) getFileIndexRange(ta, tb time.Time) (int, int, error) {
+	ma.efmux.RLock()
+	ef := ma.entryfiles
+	ma.efmux.RUnlock()
 	if len(ef) == 0 {
-		return 0, 0, 0, errempty
+		return 0, 0, errempty
 	}
 	if tb.Before(ef[0].Sdate) || ta.After(ef[len(ef)-1].Sdate.Add(ma.timedelta)) {
-		return 0, 0, 0, errdate
+		return 0, 0, errdate
 	}
 	i := sort.Search(len(ef), func(i int) bool {
 		return ef[i].Sdate.After(ta.Add(-ma.timedelta - time.Second))
@@ -798,24 +802,10 @@ func (ma *fsarchive) getFileIndexRange(ta, tb time.Time) (int, int, int64, error
 		return ef[i].Sdate.After(tb)
 	})
 
-	//This code finds the index of the offset where the request is starting.
-	// offsets[k] < ta < offsets[k+1]
-	var k int64 = 0
-	if ef[i].Offsets != nil && ef[i].Offsets[0].Time.Before(ta) {
-		for ind := 0; ind < len(ef[i].Offsets)-1 && k == 0; ind++ {
-			if ef[i].Offsets[ind].Time.Before(ta.Add(time.Second)) && ef[i].Offsets[ind+1].Time.After(ta) {
-				k = ef[i].Offsets[ind].Pos
-				log.Printf("Seeking to offset %d:%d\n", ind, k)
-			}
-		}
-	} else {
-		log.Printf("=====NO SEEKING======\n")
-	}
-
 	if ma.debug {
 		log.Printf("indexes [i:%d j:%d]", i, j)
 	}
-	return i, j, k, nil
+	return i, j, nil
 }
 
 type transformer func([]byte) ([]byte, error)
@@ -888,13 +878,19 @@ func newJsonTransformer() transformer {
 // Because of this, the archive will still have some overhead of opening files
 // after a request was canceled. That should be fairly minimal
 func transformAndSendBytes(ctx context.Context, ar *fsarchive, ta, tb time.Time, rc chan<- api.Reply, trans transformer) {
-	i, j, offPos, err := ar.getFileIndexRange(ta, tb)
+	var (
+		transdata []byte
+		terr      error
+	)
+	i, j, err := ar.getFileIndexRange(ta, tb)
 
 	if err != nil {
 		rc <- api.Reply{nil, err}
 		return
 	}
-	ef := *ar.entryfiles
+	ar.efmux.RLock()
+	ef := ar.entryfiles
+	ar.efmux.RUnlock()
 
 	open := true
 	for k := i; k < j && open; k++ {
@@ -907,12 +903,8 @@ func transformAndSendBytes(ctx context.Context, ar *fsarchive, ta, tb time.Time,
 			log.Println("failed opening file: ", ef[k].Path, " ", ferr)
 			continue
 		}
-		scanner := getScanner(file)
+		scanner := util.GetScanner(file)
 		startt := time.Now()
-		// On the first file scanned, jump to the offset position
-		if k == i {
-			file.Seek(offPos, 0)
-		}
 		for scanner.Scan() {
 			if util.NBContextClosed(ctx) {
 				open = false
@@ -920,25 +912,25 @@ func transformAndSendBytes(ctx context.Context, ar *fsarchive, ta, tb time.Time,
 			}
 			data := scanner.Bytes()
 
-			hdrbuf := ppmrt.NewMrtHdrBuf(data)
-			_, err := hdrbuf.Parse()
-			if err != nil {
+			if len(data) < 4 {
 				log.Printf("error in creating MRT header:%s", err)
 				rc <- api.Reply{Data: nil, Err: err}
 				continue
 			}
-			hdr := hdrbuf.GetHeader()
-			msgtime := time.Unix(int64(hdr.Timestamp), 0)
+			msgtime := time.Unix(int64(binary.BigEndian.Uint32(data[:4])), 0)
 			if msgtime.After(ta.Add(-time.Second)) && msgtime.Before(tb.Add(time.Second)) {
 				//documenation was saying that the Bytes() returnned from a scanner
 				//can be overwritten by subsequent calls to Scan().
 				//if we don't copy the bytes here, we have an awful race.
 				if trans != nil {
-					data, err = trans(data)
+					transdata, terr = trans(data)
+				} else {
+					transdata, terr = data, nil
 				}
-				cp := make([]byte, len(data))
-				copy(cp, data)
-				rc <- api.Reply{Data: cp, Err: err}
+				//dsp:on a second though this might not end up in a race due to channel block before the next write.
+				//cp := make([]byte, len(data))
+				//copy(cp, data)
+				rc <- api.Reply{Data: transdata, Err: terr}
 			}
 		}
 		if err := scanner.Err(); err != nil && err != io.EOF {
@@ -1003,13 +995,17 @@ func (fss *fsarstat) Query(ctx context.Context, ta, tb time.Time, retc chan api.
 		)
 		defer wg.Done()
 		ma := fss.fsarchive
-		i, j, offPos, err := ma.getFileIndexRange(ta, tb)
+		i, j, err := ma.getFileIndexRange(ta, tb)
 
 		if err != nil {
 			rc <- api.Reply{nil, err}
 			return
 		}
-		ef := *ma.entryfiles
+
+		fss.efmux.RLock()
+		ef := ma.entryfiles
+		fss.efmux.RUnlock()
+
 		open := true
 		for k := i; k < j && open; k++ {
 			if fss.debug {
@@ -1020,11 +1016,10 @@ func (fss *fsarstat) Query(ctx context.Context, ta, tb time.Time, retc chan api.
 				log.Println("failed opening file: ", ef[k].Path, " ", ferr)
 				continue
 			}
-			scanner := getScanner(file)
+			scanner := util.GetScanner(file)
 			startt := time.Now()
 			if k == i { //only on the first file to be examined
 				lastTime = ta //set it to the beginning of interval
-				file.Seek(offPos, 0)
 			}
 			for scanner.Scan() {
 				if util.NBContextClosed(ctx) {
@@ -1140,6 +1135,9 @@ func (fss *fsarstat) Query(ctx context.Context, ta, tb time.Time, retc chan api.
 	}(retc)
 }
 
+//revisit is run when we need to check for new files that are probably rsynced to the archive.
+//it uses some heuristics to ignore directories from routeviews that would contain stuff we have
+//already indexed. It is called by rescan.
 func (fsa *mrtarchive) revisit(pathname string, f os.FileInfo, err error) error {
 	if f == nil {
 		return errors.New("fileinfo is nil")
@@ -1183,16 +1181,20 @@ func (fsa *mrtarchive) revisit(pathname string, f os.FileInfo, err error) error 
 		return nil
 	}
 	if f.Mode().IsRegular() {
-		time, offs, errtime := util.GetFirstDateAndOffsets(pathname)
+		//skip temporary files being rsynced that start with .
+		if fstr := path.Base(pathname); len(fstr) > 0 && fstr[0] == '.' {
+			return nil
+		}
+		time, errtime := util.GetFirstDate(pathname)
 		if errtime != nil {
 			if fsa.debug {
-				log.Print("GetFirstDateAndOffsets failed on file: ", fname, " that should be in fooHHMM format with error: ", errtime)
+				log.Print("GetFirstDate failed on file: ", fname, " that should be in fooHHMM format with error: ", errtime)
 			}
 			return nil
 		}
 		if time.After(ld) { // only add files that are later than current lastdate.
 			log.Printf("adding file:%s with date:%v to the archive\n", pathname, time)
-			fsa.tempentryfiles = append(fsa.tempentryfiles, ArchEntryFile{Path: pathname, Sdate: time, Sz: f.Size(), Offsets: ItemOffsToEntryOffs(offs)})
+			fsa.tempentryfiles = append(fsa.tempentryfiles, ArchEntryFile{Path: pathname, Sdate: time, Sz: f.Size()})
 		} else {
 			//log.Printf("on: %s time:%v not later than last archived time:%v", fname, time, ld)
 		}
@@ -1210,14 +1212,18 @@ func (fsa *mrtarchive) visit(pathname string, f os.FileInfo, err error) error {
 		return nil
 	}
 	if f.Mode().IsRegular() {
-		time, offs, errtime := util.GetFirstDateAndOffsets(pathname)
+		//skip temporary files being rsynced that start with .
+		if fstr := path.Base(pathname); len(fstr) > 0 && fstr[0] == '.' {
+			return nil
+		}
+		time, errtime := util.GetFirstDate(pathname)
 		if errtime != nil {
 			if fsa.debug {
 				log.Print("time.Parse() failed on file: ", fname, " that should be in fooHHMM format with error: ", errtime)
 			}
 			return nil
 		}
-		fsa.tempentryfiles = append(fsa.tempentryfiles, ArchEntryFile{Path: pathname, Sdate: time, Sz: f.Size(), Offsets: ItemOffsToEntryOffs(offs)})
+		fsa.tempentryfiles = append(fsa.tempentryfiles, ArchEntryFile{Path: pathname, Sdate: time, Sz: f.Size()})
 	}
 	return nil
 }
@@ -1229,7 +1235,7 @@ func NewMRTArchive(path, descr, colname string, ref int, savepath string, debug 
 func NewFsArchive(path, descr, colname string, ref int, savepath string, debug bool) *fsarchive {
 	return &fsarchive{
 		rootpathstr:    path,
-		entryfiles:     &TimeEntrySlice{},
+		entryfiles:     TimeEntrySlice{},
 		tempentryfiles: TimeEntrySlice{},
 		reqchan:        make(chan string),
 		scanning:       false,
@@ -1250,10 +1256,12 @@ func (fsar *fsarchive) SetTimeDelta(a time.Duration) {
 }
 
 func (fsar *fsarchive) lastDate() (time.Time, error) {
-	if len(*fsar.entryfiles) == 0 {
+	fsar.efmux.RLock()
+	defer fsar.efmux.RUnlock()
+	if len(fsar.entryfiles) == 0 {
 		return time.Now(), errempty
 	}
-	return (*fsar.entryfiles)[len(*fsar.entryfiles)-1].Sdate, nil
+	return fsar.entryfiles[len(fsar.entryfiles)-1].Sdate, nil
 }
 
 //trying to see if a dir name is in YYYY.MM form
@@ -1298,28 +1306,28 @@ func isYearMonthDir(fname string) (res bool, yr int, mon int) {
 
 func (fsa *fsarchive) printEntries() {
 	log.Printf("dumping entries")
-	for _, ef := range *fsa.entryfiles {
-		fmt.Printf("%s %s\n", ef.Path, ef.Sdate.UTC())
+	fsa.efmux.RLock()
+	ef := fsa.entryfiles
+	fsa.efmux.RUnlock()
+	for _, f := range ef {
+		fmt.Printf("%s %s\n", f.Path, f.Sdate)
 	}
 }
 
 func (fsa *mrtarchive) rescan() {
 	fsa.scanning = true
+	fsa.tempentryfiles = TimeEntrySlice{}
 	filepath.Walk(fsa.rootpathstr, fsa.revisit)
 	sort.Sort(fsa.tempentryfiles)
+	fsa.mergeTempEntryWithEntryFiles()
 }
 
 func (fsa *mrtarchive) scan() {
-	//clear the temp slice
-	//fsa.scanwg.Add(1)
-	fsa.tempentryfiles = []ArchEntryFile{}
 	fsa.scanning = true
-	//fmt.Printf("the type is:%+v\n", reflect.TypeOf(fsa))
+	fsa.tempentryfiles = TimeEntrySlice{}
 	filepath.Walk(fsa.rootpathstr, fsa.visit)
 	sort.Sort(fsa.tempentryfiles)
-	//allow the serve goroutine to unblock in case of STOP.
-	//signal the serve goroutine on scandone channel
-	//fsa.scanch <- struct{}{}
+	fsa.StoreTempEntryFiles()
 }
 
 func (fsa *mrtarchive) Serve(wg, allscanwg *sync.WaitGroup) (reqchan chan<- string) {
@@ -1330,6 +1338,7 @@ func (fsa *mrtarchive) Serve(wg, allscanwg *sync.WaitGroup) (reqchan chan<- stri
 	log.Printf("rescanning every :%v", time.Minute*time.Duration(fsa.refreshmin))
 	wg.Add(1)
 	go func() {
+		fstr := fmt.Sprintf("%s/%s-%s", fsa.savepath, fsa.descriminator, fsa.collectorstr)
 		defer wg.Done()
 		for {
 			select {
@@ -1339,12 +1348,11 @@ func (fsa *mrtarchive) Serve(wg, allscanwg *sync.WaitGroup) (reqchan chan<- stri
 					if fsa.scanning {
 						log.Print("fsarchive: already scanning. ignoring command")
 					} else { //fire an async goroutine to scan the files and wait for SCANDONE
-						log.Printf("fsarchive:%s scanning.", fsa.descriminator)
+						log.Printf("fsarchive:%s scanning.", fstr)
 						allscanwg.Add(1)
 						fsa.scanwg.Add(1)
 						fsa.scan()
 						fsa.scanning = false
-						fsa.entryfiles = &fsa.tempentryfiles
 						fsa.scanwg.Done()
 						allscanwg.Done()
 					}
@@ -1352,20 +1360,19 @@ func (fsa *mrtarchive) Serve(wg, allscanwg *sync.WaitGroup) (reqchan chan<- stri
 					if fsa.scanning {
 						log.Print("fsarchive: already scanning. ignoring command")
 					} else { //fire an async goroutine to scan the files and wait for SCANDONE
-						log.Printf("fsarchive:%s rescanning.", fsa.descriminator)
+						log.Printf("fsarchive:%s rescanning.", fstr)
 						fsa.rescan()
-						fsa.scanning = false
-						fsa.entryfiles = &fsa.tempentryfiles
-						errg := fsa.tempentryfiles.ToGobFile(fmt.Sprintf("%s/%s", fsa.savepath, fsa.descriminator))
+						errg := fsa.Save(fstr)
 						if errg != nil {
 							log.Println(errg)
 						} else {
-							log.Printf("succesfully rewrote serialized file for archive:%s", fsa.descriminator)
+							log.Printf("succesfully rewrote serialized file:%s for archive:%s", fstr, fsa.descriminator)
 						}
+						fsa.scanning = false
 					}
 				case "DUMPENTRIES":
 					if fsa.scanning {
-						log.Printf("fsar: warning. scanning in progress", fsa.descriminator)
+						log.Printf("fsar:%s warning. scanning in progress", fsa.descriminator)
 					}
 					fsa.printEntries()
 				case "STOP":
@@ -1380,17 +1387,16 @@ func (fsa *mrtarchive) Serve(wg, allscanwg *sync.WaitGroup) (reqchan chan<- stri
 				if fsa.scanning {
 					log.Print("fsarchive: already scanning. ignoring command")
 				} else { //fire an async goroutine to scan the files and wait for SCANDONE
-					log.Printf("fsarchive:%s rescanning.", fsa.descriminator)
+					log.Printf("fsarchive:%s rescanning.", fstr)
 					fsa.rescan()
-					fsa.scanning = false
-					fsa.entryfiles = &fsa.tempentryfiles
 					//rewrite the file
-					errg := fsa.tempentryfiles.ToGobFile(fmt.Sprintf("%s/%s-%s", fsa.savepath, fsa.descriminator, fsa.collectorstr))
+					errg := fsa.Save(fstr)
 					if errg != nil {
 						log.Println(errg)
 					} else {
-						log.Printf("succesfully rewrote serialized file for archive:%s", fsa.descriminator)
+						log.Printf("succesfully rewrote serialized file:%s for archive:%s", fstr, fsa.descriminator)
 					}
+					fsa.scanning = false
 				}
 			}
 		}

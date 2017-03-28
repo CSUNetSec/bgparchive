@@ -198,7 +198,7 @@ type fsarchive struct {
 	entryfiles     TimeEntrySlice
 	tempentryfiles TimeEntrySlice
 	reqchan        chan string
-	scanning       bool
+	firstscan      bool
 	scanwg         *sync.WaitGroup
 	scanch         chan struct{}
 	timedelta      time.Duration
@@ -1211,7 +1211,7 @@ func NewFsArchive(path, descr, colname string, ref int, savepath string, debug b
 		entryfiles:     TimeEntrySlice{},
 		tempentryfiles: TimeEntrySlice{},
 		reqchan:        make(chan string),
-		scanning:       false,
+		firstscan:      true,
 		scanwg:         &sync.WaitGroup{},
 		scanch:         make(chan struct{}),
 		timedelta:      15 * time.Minute,
@@ -1288,16 +1288,12 @@ func (fsa *fsarchive) printEntries() {
 }
 
 func (fsa *mrtarchive) rescan() {
-	fsa.scanning = true
-	fsa.tempentryfiles = TimeEntrySlice{}
 	filepath.Walk(fsa.rootpathstr, fsa.revisit)
 	sort.Sort(fsa.tempentryfiles)
 	fsa.mergeTempEntryWithEntryFiles()
 }
 
 func (fsa *mrtarchive) scan() {
-	fsa.scanning = true
-	fsa.tempentryfiles = TimeEntrySlice{}
 	filepath.Walk(fsa.rootpathstr, fsa.visit)
 	sort.Sort(fsa.tempentryfiles)
 	fsa.StoreTempEntryFiles()
@@ -1318,35 +1314,27 @@ func (fsa *mrtarchive) Serve(wg, allscanwg *sync.WaitGroup) (reqchan chan<- stri
 			case req := <-fsa.reqchan:
 				switch req {
 				case "SCAN":
-					if fsa.scanning {
-						log.Print("fsarchive: already scanning. ignoring command")
-					} else { //fire an async goroutine to scan the files and wait for SCANDONE
+					fsa.scanwg.Wait() //wait for a prev scan to finish
+					allscanwg.Add(1)
+					fsa.scanwg.Add(1)
+					fsa.tempentryfiles = TimeEntrySlice{}
+					if fsa.firstscan {
 						log.Printf("fsarchive:%s scanning.", fstr)
-						allscanwg.Add(1)
-						fsa.scanwg.Add(1)
 						fsa.scan()
-						fsa.scanning = false
-						fsa.scanwg.Done()
-						allscanwg.Done()
-					}
-				case "RESCAN":
-					if fsa.scanning {
-						log.Print("fsarchive: already scanning. ignoring command")
+						fsa.firstscan = false
 					} else { //fire an async goroutine to scan the files and wait for SCANDONE
 						log.Printf("fsarchive:%s rescanning.", fstr)
 						fsa.rescan()
-						errg := fsa.Save(fstr)
-						if errg != nil {
-							log.Println(errg)
-						} else {
-							log.Printf("succesfully rewrote serialized file:%s for archive:%s", fstr, fsa.descriminator)
-						}
-						fsa.scanning = false
 					}
+					errg := fsa.Save(fstr)
+					if errg != nil {
+						log.Println(errg)
+					} else {
+						log.Printf("succesfully rewrote serialized file:%s for archive:%s", fstr, fsa.descriminator)
+					}
+					fsa.scanwg.Done()
+					allscanwg.Done()
 				case "DUMPENTRIES":
-					if fsa.scanning {
-						log.Printf("fsar:%s warning. scanning in progress", fsa.descriminator)
-					}
 					fsa.printEntries()
 				case "STOP":
 					log.Printf("fsar:%s stopping", fsa.descriminator)
@@ -1356,21 +1344,21 @@ func (fsa *mrtarchive) Serve(wg, allscanwg *sync.WaitGroup) (reqchan chan<- stri
 					return
 				}
 			case <-tick.C:
-				log.Printf("rescanning")
-				if fsa.scanning {
-					log.Print("fsarchive: already scanning. ignoring command")
-				} else { //fire an async goroutine to scan the files and wait for SCANDONE
-					log.Printf("fsarchive:%s rescanning.", fstr)
-					fsa.rescan()
-					//rewrite the file
-					errg := fsa.Save(fstr)
-					if errg != nil {
-						log.Println(errg)
-					} else {
-						log.Printf("succesfully rewrote serialized file:%s for archive:%s", fstr, fsa.descriminator)
-					}
-					fsa.scanning = false
+				fsa.scanwg.Wait() //wait for a prev scan to finish
+				allscanwg.Add(1)
+				fsa.scanwg.Add(1)
+				log.Printf("fsarchive:%s rescanning.", fstr)
+				fsa.tempentryfiles = TimeEntrySlice{}
+				fsa.rescan()
+				//rewrite the file
+				errg := fsa.Save(fstr)
+				if errg != nil {
+					log.Println(errg)
+				} else {
+					log.Printf("succesfully rewrote serialized file:%s for archive:%s", fstr, fsa.descriminator)
 				}
+				fsa.scanwg.Done()
+				allscanwg.Done()
 			}
 		}
 	}()

@@ -228,8 +228,8 @@ func (f fsarchive) getContextChans() (chan contCmd, chan contCli) {
 
 func (f *fsarchive) GetDateRangeString() string {
 	f.efmux.RLock()
+	defer f.efmux.RUnlock()
 	ef := f.entryfiles
-	f.efmux.RUnlock()
 	if len(ef) > 0 {
 		dates := fmt.Sprintf("%s - %s\n", ef[0].Sdate, ef[len(ef)-1].Sdate)
 		return dates

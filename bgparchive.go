@@ -1317,7 +1317,9 @@ func (fsa *mrtarchive) Serve(wg, allscanwg *sync.WaitGroup) (reqchan chan<- stri
 					fsa.scanwg.Wait() //wait for a prev scan to finish
 					allscanwg.Add(1)
 					fsa.scanwg.Add(1)
+					fsa.efmux.Lock()
 					fsa.tempentryfiles = TimeEntrySlice{}
+					fsa.efmux.Lock()
 					if fsa.firstscan {
 						log.Printf("fsarchive:%s scanning.", fstr)
 						fsa.scan()
@@ -1348,7 +1350,9 @@ func (fsa *mrtarchive) Serve(wg, allscanwg *sync.WaitGroup) (reqchan chan<- stri
 				allscanwg.Add(1)
 				fsa.scanwg.Add(1)
 				log.Printf("fsarchive:%s rescanning.", fstr)
+				fsa.efmux.Lock()
 				fsa.tempentryfiles = TimeEntrySlice{}
+				fsa.efmux.Unlock()
 				fsa.rescan()
 				//rewrite the file
 				errg := fsa.Save(fstr)

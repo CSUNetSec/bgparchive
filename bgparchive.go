@@ -99,7 +99,7 @@ var (
 )
 
 type HelpMsg struct {
-	ars []helpMessager
+	ars []*fsarconf
 	api.PutNotAllowed
 	api.PostNotAllowed
 	api.DeleteNotAllowed
@@ -111,7 +111,9 @@ func (h *HelpMsg) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 		defer close(rch)
 		rch <- api.Reply{Data: []byte(fmt.Sprintf("%s\n", HELPSTR)), Err: nil}
 		for i := range h.ars {
+			h.ars[i].efmux.Lock()
 			rch <- api.Reply{Data: []byte(h.ars[i].getHelpMessage()), Err: nil}
+			h.ars[i].efmux.Unlock()
 		}
 		return
 	}(retc)
@@ -128,7 +130,7 @@ func riborupdatestr(a string) string {
 	return strings.ToLower(a)
 }
 
-func (h *HelpMsg) AddArchive(ar helpMessager) {
+func (h *HelpMsg) AddArchive(ar *fsarconf) {
 	h.ars = append(h.ars, ar)
 }
 
@@ -154,10 +156,6 @@ type contpuller interface {
 type contarchive interface {
 	archive
 	contpuller
-}
-
-type helpMessager interface {
-	getHelpMessage() string
 }
 
 //implements Sort interface by time.Time
@@ -217,7 +215,6 @@ type fsarchive struct {
 	api.DeleteNotAllowed
 }
 
-//implement the helpMessager interface
 func (f fsarchive) getHelpMessage() string {
 	return fmt.Sprintf("\t%-8s archive: %-25s\trange:%s", riborupdatestr(f.descriminator), f.GetCollectorString(), f.GetDateRangeString())
 }

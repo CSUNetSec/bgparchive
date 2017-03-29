@@ -120,7 +120,7 @@ func main() {
 		} else {
 			log.Printf("Found serialized file %s for archive:%v.", fstr, v)
 		}
-		hmsg.AddArchive(*fsc)
+		hmsg.AddArchive(fsc)
 	}
 	allscanwg.Wait()
 	//the global help message

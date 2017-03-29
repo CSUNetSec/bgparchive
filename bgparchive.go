@@ -224,8 +224,6 @@ func (f fsarchive) getContextChans() (chan contCmd, chan contCli) {
 }
 
 func (f *fsarchive) GetDateRangeString() string {
-	f.efmux.RLock()
-	defer f.efmux.RUnlock()
 	ef := f.entryfiles
 	if len(ef) > 0 {
 		dates := fmt.Sprintf("%s - %s\n", ef[0].Sdate, ef[len(ef)-1].Sdate)
@@ -1316,7 +1314,7 @@ func (fsa *mrtarchive) Serve(wg, allscanwg *sync.WaitGroup) (reqchan chan<- stri
 					fsa.scanwg.Add(1)
 					fsa.efmux.Lock()
 					fsa.tempentryfiles = TimeEntrySlice{}
-					fsa.efmux.Lock()
+					fsa.efmux.Unlock()
 					if fsa.firstscan {
 						log.Printf("fsarchive:%s scanning.", fstr)
 						fsa.scan()

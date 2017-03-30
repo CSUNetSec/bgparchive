@@ -3,6 +3,7 @@ package util
 import (
 	"bufio"
 	"compress/bzip2"
+	"context"
 	"encoding/binary"
 	"fmt"
 	ppmrt "github.com/CSUNetSec/protoparse/protocol/mrt"
@@ -54,4 +55,18 @@ func GetFirstDate(fname string) (t time.Time, err error) {
 		log.Printf("GetFirstDate read error on:%s. Read %d bytes or error:%s", fname, nb, errread)
 	}
 	return GetTimestampFromMRT(hdbuf)
+}
+
+// Non-blocking context closed function
+// Just a simple function for some repeated code
+// Returns true if the context has been closed, such as with a cancel func
+func NBContextClosed(ctx context.Context) bool {
+	closed := false
+	select {
+	case <-ctx.Done():
+		closed = true
+	default:
+		//Empty default to disable blocking
+	}
+	return closed
 }

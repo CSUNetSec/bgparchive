@@ -2,6 +2,7 @@ package bgparchive
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/gob"
 	"encoding/hex"
@@ -105,12 +106,16 @@ type HelpMsg struct {
 	api.DeleteNotAllowed
 }
 
-func (h *HelpMsg) Get(values url.Values) (api.HdrReply, chan api.Reply) {
+//TODO: does this function need context?
+func (h *HelpMsg) Get(ctx context.Context, values url.Values) (api.HdrReply, chan api.Reply) {
 	retc := make(chan api.Reply)
 	go func(rch chan api.Reply) {
 		defer close(rch)
 		rch <- api.Reply{Data: []byte(fmt.Sprintf("%s\n", HELPSTR)), Err: nil}
 		for i := range h.ars {
+			if util.NBContextClosed(ctx) {
+				break
+			}
 			h.ars[i].efmux.Lock()
 			rch <- api.Reply{Data: []byte(h.ars[i].getHelpMessage()), Err: nil}
 			h.ars[i].efmux.Unlock()
@@ -146,7 +151,7 @@ type BgpStats struct {
 //that all write their results to chan api.Reply, and we also need the waitgroup
 //to know when we should close the channel to end the http transaction
 type archive interface {
-	Query(time.Time, time.Time, chan api.Reply, *sync.WaitGroup)
+	Query(context.Context, time.Time, time.Time, chan api.Reply, *sync.WaitGroup)
 }
 
 type contpuller interface {
@@ -589,9 +594,9 @@ func NewFsarconf(a *fsarchive) *fsarconf {
 //the reason is that we create the channel here and we must
 //return it to the responsewriter and any sends would block
 //without the receiver being ready.
-func (fsc *fsarconf) Get(values url.Values) (api.HdrReply, chan api.Reply) {
+func (fsc *fsarconf) Get(ctx context.Context, values url.Values) (api.HdrReply, chan api.Reply) {
 	retc := make(chan api.Reply)
-	go func(fc *fsarconf) {
+	go func(fc *fsarconf, cont context.Context) {
 		defer close(retc) //must close the chan to let the listener finish.
 		fc.efmux.RLock()
 		arfiles := fc.fsarchive.entryfiles
@@ -612,16 +617,19 @@ func (fsc *fsarconf) Get(values url.Values) (api.HdrReply, chan api.Reply) {
 		}
 		if _, ok := values["files"]; ok {
 			for _, f := range arfiles {
+				if util.NBContextClosed(cont) {
+					break
+				}
 				retc <- api.Reply{Data: []byte(fmt.Sprintf("%s\n", filepath.Base(f.Path))), Err: nil}
 			}
 			return
 		}
 		return
-	}(fsc)
+	}(fsc, ctx)
 	return api.HdrReply{Code: 200}, retc
 }
 
-func getTimerange(values url.Values, ar archive, h api.HdrReply) (api.HdrReply, chan api.Reply) {
+func getTimerange(ctx context.Context, values url.Values, ar archive, h api.HdrReply) (api.HdrReply, chan api.Reply) {
 	var (
 		grwg sync.WaitGroup
 	)
@@ -633,6 +641,7 @@ func getTimerange(values url.Values, ar archive, h api.HdrReply) (api.HdrReply, 
 		go func() { defer grwg.Done(); retc <- api.Reply{Data: nil, Err: errbadreq} }()
 		goto done
 	}
+	// This should be really quick, and typically only one iteration, does it need context?
 	for i := 0; i < len(timeAstrs); i++ {
 		log.Printf("timeAstr:%s timeBstr:%s .Current server time:%v", timeAstrs[i], timeBstrs[i], time.Now())
 		timeA, errtime := time.Parse("20060102150405", timeAstrs[i])
@@ -661,7 +670,7 @@ func getTimerange(values url.Values, ar archive, h api.HdrReply) (api.HdrReply, 
 			go func() { defer grwg.Done(); retc <- api.Reply{Data: nil, Err: errbigdt} }()
 		} else {
 			log.Printf("3:%v %v", timeA, timeB)
-			ar.Query(timeA, timeB, retc, &grwg) //this will fire a new goroutine
+			ar.Query(ctx, timeA, timeB, retc, &grwg) //this will fire a new goroutine
 		}
 	}
 	// the last goroutine that will wait for all we invoked and close the chan
@@ -679,7 +688,8 @@ func timeToString(a time.Time) string {
 	return a.UTC().Format("20060102150405")
 }
 
-func handleParams(values url.Values, ar contarchive) (api.HdrReply, chan api.Reply) {
+//This just accepts a context to pass to getTimeRange and Query
+func handleParams(ctx context.Context, values url.Values, ar contarchive) (api.HdrReply, chan api.Reply) {
 	var (
 		grwg sync.WaitGroup
 		defh api.HdrReply
@@ -694,7 +704,7 @@ func handleParams(values url.Values, ar contarchive) (api.HdrReply, chan api.Rep
 		ip = []string{"IP error"}
 	}
 	if !ok1 {
-		return getTimerange(values, ar, defh)
+		return getTimerange(ctx, values, ar, defh)
 	}
 	retc := make(chan api.Reply)
 	creqch, crepch := ar.getContextChans()
@@ -717,7 +727,7 @@ func handleParams(values url.Values, ar contarchive) (api.HdrReply, chan api.Rep
 			if ok2 {
 				//we create a string of the current time.
 				values["end"] = []string{timeToString(time.Now())}
-				return getTimerange(values, ar, defh)
+				return getTimerange(ctx, values, ar, defh)
 			}
 		} else {
 			log.Printf("error :%s", rep.err)
@@ -734,7 +744,7 @@ func handleParams(values url.Values, ar contarchive) (api.HdrReply, chan api.Rep
 			log.Printf("sending next id for cli %+v", rep)
 			defh.Extra = rep.id
 			if !rep.t2pull.IsZero() { //
-				ar.Query(rep.t1pull, rep.t2pull, retc, &grwg)
+				ar.Query(ctx, rep.t1pull, rep.t2pull, retc, &grwg)
 				goto done
 			}
 		} else {
@@ -754,20 +764,20 @@ done:
 
 }
 
-func (fsa *fsarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
-	return handleParams(values, fsa)
+func (fsa *fsarchive) Get(ctx context.Context, values url.Values) (api.HdrReply, chan api.Reply) {
+	return handleParams(ctx, values, fsa)
 }
 
-func (pba *pbarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
-	return handleParams(values, pba)
+func (pba *pbarchive) Get(ctx context.Context, values url.Values) (api.HdrReply, chan api.Reply) {
+	return handleParams(ctx, values, pba)
 }
 
-func (jsa *jsonarchive) Get(values url.Values) (api.HdrReply, chan api.Reply) {
-	return handleParams(values, jsa)
+func (jsa *jsonarchive) Get(ctx context.Context, values url.Values) (api.HdrReply, chan api.Reply) {
+	return handleParams(ctx, values, jsa)
 }
 
-func (fss *fsarstat) Get(values url.Values) (api.HdrReply, chan api.Reply) {
-	return getTimerange(values, fss, api.HdrReply{Code: 200})
+func (fss *fsarstat) Get(ctx context.Context, values url.Values) (api.HdrReply, chan api.Reply) {
+	return getTimerange(ctx, values, fss, api.HdrReply{Code: 200})
 }
 
 func (ma *fsarchive) getFileIndexRange(ta, tb time.Time) (int, int, error) {
@@ -859,7 +869,10 @@ func newJsonTransformer() transformer {
 	}
 }
 
-func transformAndSendBytes(ar *fsarchive, ta, tb time.Time, rc chan<- api.Reply, trans transformer) {
+// This only checks the context after a scan to see if it should send the data.
+// Because of this, the archive will still have some overhead of opening files
+// after a request was canceled. That should be fairly minimal
+func transformAndSendBytes(ctx context.Context, ar *fsarchive, ta, tb time.Time, rc chan<- api.Reply, trans transformer) {
 	var (
 		transdata []byte
 		terr      error
@@ -874,7 +887,9 @@ func transformAndSendBytes(ar *fsarchive, ta, tb time.Time, rc chan<- api.Reply,
 	ef := ar.entryfiles
 	ar.efmux.RUnlock()
 
-	for k := i; k < j; k++ {
+	open := true
+	for k := i; k < j && open; k++ {
+
 		if ar.debug {
 			log.Printf("opening:%s", ef[k].Path)
 		}
@@ -886,6 +901,10 @@ func transformAndSendBytes(ar *fsarchive, ta, tb time.Time, rc chan<- api.Reply,
 		scanner := util.GetScanner(file)
 		startt := time.Now()
 		for scanner.Scan() {
+			if util.NBContextClosed(ctx) {
+				open = false
+				break
+			}
 			data := scanner.Bytes()
 
 			if len(data) < 4 {
@@ -918,43 +937,44 @@ func transformAndSendBytes(ar *fsarchive, ta, tb time.Time, rc chan<- api.Reply,
 
 }
 
-func (ma *fsarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
+func (ma *fsarchive) Query(ctx context.Context, ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
 	log.Printf("mrt query from %s to %s\n", ta, tb)
 	//Always add to the waitgroup before calling the go statement.
 	wg.Add(1)
 	go func(rc chan<- api.Reply) {
 		defer wg.Done()
 		it := newIdentityTransformer()
-		transformAndSendBytes(ma, ta, tb, rc, it)
+		transformAndSendBytes(ctx, ma, ta, tb, rc, it)
 		return
 	}(retc)
 }
 
-func (pba *pbarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
+func (pba *pbarchive) Query(ctx context.Context, ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
 	log.Printf("protobuf query from %s to %s\n", ta, tb)
 	//Always add to the waitgroup before calling the go statement.
 	wg.Add(1)
 	go func(rc chan<- api.Reply) {
 		defer wg.Done()
 		pt := newProtobufTransformer()
-		transformAndSendBytes(pba.fsarchive, ta, tb, rc, pt)
+		transformAndSendBytes(ctx, pba.fsarchive, ta, tb, rc, pt)
 		return
 	}(retc)
 }
 
-func (jsa *jsonarchive) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
+func (jsa *jsonarchive) Query(ctx context.Context, ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
 	log.Printf("json query from %s to %s\n", ta, tb)
 	//Always add to the waitgroup before calling the go statement.
 	wg.Add(1)
 	go func(rc chan<- api.Reply) {
 		defer wg.Done()
 		jt := newJsonTransformer()
-		transformAndSendBytes(jsa.fsarchive, ta, tb, rc, jt)
+		transformAndSendBytes(ctx, jsa.fsarchive, ta, tb, rc, jt)
 		return
 	}(retc)
 }
 
-func (fss *fsarstat) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
+// TODO: Check if this has a possible deadlock situation when canceled early
+func (fss *fsarstat) Query(ctx context.Context, ta, tb time.Time, retc chan api.Reply, wg *sync.WaitGroup) {
 	log.Printf("stat query from %s to %s\n", ta, tb)
 	//Always add to the waitgroup before calling the go statement.
 	wg.Add(1)
@@ -976,10 +996,13 @@ func (fss *fsarstat) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitG
 			rc <- api.Reply{nil, err}
 			return
 		}
+
 		fss.efmux.RLock()
 		ef := ma.entryfiles
 		fss.efmux.RUnlock()
-		for k := i; k < j; k++ {
+
+		open := true
+		for k := i; k < j && open; k++ {
 			if fss.debug {
 				log.Printf("opening:%s", ef[k].Path)
 			}
@@ -994,6 +1017,10 @@ func (fss *fsarstat) Query(ta, tb time.Time, retc chan api.Reply, wg *sync.WaitG
 				lastTime = ta //set it to the beginning of interval
 			}
 			for scanner.Scan() {
+				if util.NBContextClosed(ctx) {
+					open = false
+					break
+				}
 				data := scanner.Bytes()
 
 				hdrbuf := ppmrt.NewMrtHdrBuf(data)

@@ -16,10 +16,11 @@ import (
 )
 
 var (
-	output_suffix string
-	print_tes     bool
-	sample_rate   float64
-	new_dir       string
+	output_suffix  string
+	print_tes      bool
+	sample_rate    float64
+	new_dir        string
+	remove_indexes bool
 )
 
 const (
@@ -29,8 +30,9 @@ const (
 func init() {
 	flag.StringVar(&output_suffix, "outsuffix", "", "suffix of the generated index file")
 	flag.StringVar(&output_suffix, "o", "", "")
-	flag.Float64Var(&sample_rate, "rate", DEFAULT_SAMPLING_RATE, "sample rate used")
-	flag.Float64Var(&sample_rate, "r", DEFAULT_SAMPLING_RATE, "")
+	flag.Float64Var(&sample_rate, "sample", DEFAULT_SAMPLING_RATE, "sample rate used")
+	flag.Float64Var(&sample_rate, "s", DEFAULT_SAMPLING_RATE, "")
+	flag.BoolVar(&remove_indexes, "r", false, "remove indexes from tes file")
 	flag.BoolVar(&print_tes, "print", false, "Do not create the index file, print the TES file to standard output instead")
 	flag.BoolVar(&print_tes, "p", false, "")
 	flag.StringVar(&new_dir, "dir", "", "rewrit dir of the files referenced in the index. Must be the same across all entries. format is s:olddir:newdir")
@@ -84,7 +86,11 @@ func main() {
 
 		for _, tesName := range args {
 			wg.Add(1)
-			go createIndexedTESFile(tesName, &wg)
+			if remove_indexes {
+				go removeIndexes(tesName, &wg)
+			} else {
+				go createIndexedTESFile(tesName, &wg)
+			}
 		}
 		wg.Wait()
 	}
@@ -131,6 +137,41 @@ func printTes(tesName string) error {
 	return nil
 }
 
+func removeIndexes(tesName string, wg *sync.WaitGroup) {
+	defer wg.Done()
+	entries := bgp.TimeEntrySlice{}
+	err := (&entries).FromGobFile(tesName)
+	if err != nil {
+		fmt.Printf("Error opening indexfile: %s\n", tesName)
+		return
+	}
+	suf := output_suffix
+	if suf == "" {
+		suf = "plain"
+	}
+	output_name := tesName + "." + suf
+	if _, err := os.Stat(output_name); !os.IsNotExist(err) {
+		fmt.Printf("Error: destination file:%s already exists\n", output_name)
+		return
+	}
+	for enct, _ := range entries {
+		entryfile, err := os.Open(entries[enct].Path)
+		if err != nil {
+			fmt.Printf("Error opening ArchEntryFile: %s\n", entries[enct].Path)
+			return
+		}
+		entries[enct].Offsets = nil
+		fmt.Printf("Removed offsets for file:%s\n", entries[enct].Path)
+		entryfile.Close()
+	}
+	err = entries.ToGobFile(output_name)
+	if err != nil {
+		fmt.Printf("Error regobing TES: %s\n", tesName)
+	}
+	return
+
+}
+
 func createIndexedTESFile(tesName string, wg *sync.WaitGroup) {
 	defer wg.Done()
 	entries := bgp.TimeEntrySlice{}
@@ -157,7 +198,7 @@ func createIndexedTESFile(tesName string, wg *sync.WaitGroup) {
 		m := util.GenerateIndexes(entryfile, sample_rate, util.GetTimestampFromMRT)
 		entries[enct].Offsets = make([]bgp.EntryOffset, len(m))
 		for ct, offset := range m {
-			if offset != nil {
+			if &offset != nil {
 				entries[enct].Offsets[ct] = bgp.EntryOffset{offset.Value.(time.Time), offset.Off}
 			} else {
 				fmt.Printf("Null offset, should not have happened.\n")
